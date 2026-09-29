@@ -125,7 +125,7 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
               <div className="flex-1 min-w-0">
                 <h3 className="font-bold text-white text-base truncate">{preview.title}</h3>
                 <p className="text-xs text-spotify-green font-medium">
-                  זוהו {preview.totalTracks} שירים ({preview.type.toUpperCase()})
+                  זוהו {preview.tracks?.length || 0} שירים ({preview.type})
                 </p>
               </div>
             </div>
