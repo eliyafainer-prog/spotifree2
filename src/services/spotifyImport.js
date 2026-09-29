@@ -1,4 +1,4 @@
-// Client-Side Spotify & YouTube Playlist Importer with Smart URL Normalization & Fallbacks
+// Client-Side Spotify & YouTube Playlist Importer with Strict Parsing & No Fake Fallbacks
 import { searchTracks } from './directAudio.js';
 
 /**
@@ -13,25 +13,7 @@ export async function importPlaylistFromUrl(url) {
 
   // 1. Try Spotify entity parsing & import
   if (cleanUrl.includes('spotify.com') || cleanUrl.includes('spotify:') || /[a-zA-Z0-9]{22}/.test(cleanUrl)) {
-    try {
-      return await importSpotifyPlaylist(cleanUrl);
-    } catch (err) {
-      console.warn('Spotify import attempt 1 failed:', err);
-      // Fallback search by query if input was text or title
-      if (!cleanUrl.includes('http') && cleanUrl.length > 2) {
-        const searchRes = await searchTracks(cleanUrl, 15);
-        if (searchRes.length > 0) {
-          return {
-            id: `pl_search_${Date.now()}`,
-            title: `פלייליסט: ${cleanUrl}`,
-            cover: searchRes[0].thumbnail,
-            type: 'Custom Playlist',
-            tracks: searchRes
-          };
-        }
-      }
-      throw err;
-    }
+    return await importSpotifyPlaylist(cleanUrl);
   }
 
   // 2. Handle YouTube URL
@@ -39,19 +21,21 @@ export async function importPlaylistFromUrl(url) {
     return importYouTubePlaylist(cleanUrl);
   }
 
-  // 3. Fallback: Search tracks directly by query string
-  const searchRes = await searchTracks(cleanUrl, 15);
-  if (searchRes.length > 0) {
-    return {
-      id: `pl_search_${Date.now()}`,
-      title: `פלייליסט: ${cleanUrl}`,
-      cover: searchRes[0].thumbnail,
-      type: 'Search Playlist',
-      tracks: searchRes
-    };
+  // 3. Fallback: Search tracks directly ONLY if user typed a plain search query (not a URL)
+  if (!cleanUrl.includes('http') && !cleanUrl.includes('.com') && cleanUrl.length > 2) {
+    const searchRes = await searchTracks(cleanUrl, 15);
+    if (searchRes.length > 0) {
+      return {
+        id: `pl_search_${Date.now()}`,
+        title: `פלייליסט: ${cleanUrl}`,
+        cover: searchRes[0].thumbnail,
+        type: 'Search Playlist',
+        tracks: searchRes
+      };
+    }
   }
 
-  throw new Error('לא הצלחנו לייבא את השירים מקישור זה. ודא שהקישור של הפלייליסט ב-Spotify מוגדר כציבורי (Public).');
+  throw new Error('לא הצלחנו לייבא את השירים מקישור זה. ודא שהקישור של הפלייליסט ב-Spotify תקין ושהפלייליסט מוגדר כציבורי (Public).');
 }
 
 /**
@@ -71,21 +55,57 @@ function extractSpotifyEntity(input) {
 }
 
 /**
- * Import Spotify Playlist, Album or Track
+ * Parse Spotify Embed HTML string into entity object
+ */
+function parseSpotifyEmbedHtml(html) {
+  if (!html) return null;
+
+  // Strategy 1: __NEXT_DATA__ JSON
+  const nextMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">([^<]+)<\/script>/);
+  if (nextMatch && nextMatch[1]) {
+    try {
+      const nextData = JSON.parse(nextMatch[1]);
+      const entity = nextData.props?.pageProps?.state?.data?.entity;
+      if (entity) return entity;
+    } catch (e) {}
+  }
+
+  // Strategy 2: Base64 JSON inside body script (resource or initial-state)
+  const b64Matches = html.matchAll(/<script[^>]*>(.*?)<\/script>/gs);
+  for (const m of b64Matches) {
+    const content = m[1]?.trim();
+    if (!content) continue;
+    try {
+      const decoded = atob(content);
+      if (decoded.includes('"trackList"') || decoded.includes('"entity"')) {
+        const parsed = JSON.parse(decoded);
+        if (parsed?.data?.entity) return parsed.data.entity;
+        if (parsed?.trackList) return parsed;
+      }
+    } catch (e) {}
+  }
+
+  return null;
+}
+
+/**
+ * Import Spotify Playlist, Album or Track strictly without fake search fallbacks
  */
 async function importSpotifyPlaylist(rawUrl) {
   const entity = extractSpotifyEntity(rawUrl);
-  const type = entity?.type || 'playlist';
-  const spotifyId = entity?.id;
+  if (!entity || !entity.id) {
+    throw new Error('לא נראית כתובת ספוטיפיי תקינה. נא להעתיק את הקישור המלא של הפלייליסט מספוטיפיי.');
+  }
 
-  const canonicalUrl = spotifyId
-    ? `https://open.spotify.com/${type}/${spotifyId}`
-    : rawUrl;
+  const type = entity.type || 'playlist';
+  const spotifyId = entity.id;
+  const canonicalUrl = `https://open.spotify.com/${type}/${spotifyId}`;
+  const embedUrl = `https://open.spotify.com/embed/${type}/${spotifyId}`;
 
   let title = type === 'album' ? 'אלבום מיובא' : 'פלייליסט ספוטיפיי';
   let cover = '';
 
-  // 1. Fetch metadata via Spotify oEmbed
+  // 1. Try fetching oEmbed metadata
   try {
     const oembedRes = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(canonicalUrl)}`);
     if (oembedRes.ok) {
@@ -95,67 +115,62 @@ async function importSpotifyPlaylist(rawUrl) {
     }
   } catch (e) {}
 
-  // 2. Fetch Embed Page HTML
-  const embedUrl = `https://open.spotify.com/embed/${type}/${spotifyId || ''}`;
+  // 2. Fetch Embed HTML (direct fetch + proxy fallbacks)
   let html = '';
-  try {
-    const res = await fetch(embedUrl);
-    if (res.ok) html = await res.text();
-  } catch (e) {
+  const fetchUrls = [
+    embedUrl,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(embedUrl)}`,
+    `https://corsproxy.io/?${encodeURIComponent(embedUrl)}`,
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(embedUrl)}`
+  ];
+
+  for (const fetchUrl of fetchUrls) {
     try {
-      const proxyRes = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(embedUrl)}`);
-      if (proxyRes.ok) html = await proxyRes.text();
-    } catch (err) {}
+      const res = await fetch(fetchUrl);
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.length > 500) {
+          html = text;
+          break;
+        }
+      }
+    } catch (e) {}
   }
 
   const tracks = [];
 
   if (html) {
-    try {
-      const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([^<]+)<\/script>/);
-      if (match && match[1]) {
-        const nextData = JSON.parse(match[1]);
-        const dataEntity = nextData.props?.pageProps?.state?.data?.entity;
+    const dataEntity = parseSpotifyEmbedHtml(html);
 
-        if (dataEntity) {
-          title = dataEntity.title || dataEntity.name || title;
-          if (!cover && dataEntity.visualIdentity?.image?.[0]?.url) {
-            cover = dataEntity.visualIdentity.image[0].url;
-          }
+    if (dataEntity) {
+      title = dataEntity.title || dataEntity.name || title;
+      if (!cover && dataEntity.visualIdentity?.image?.[0]?.url) {
+        cover = dataEntity.visualIdentity.image[0].url;
+      }
 
-          const trackList = dataEntity.trackList || [];
-          for (let i = 0; i < trackList.length; i++) {
-            const item = trackList[i];
-            tracks.push({
-              id: `sp_${item.uri?.replace('spotify:track:', '') || i}`,
-              title: item.title || item.name || 'Unknown Title',
-              artist: item.subtitle || item.artists?.[0]?.name || 'Unknown Artist',
-              thumbnail: cover,
-              durationSeconds: Math.round((item.duration || 180000) / 1000),
-              source: 'spotify'
-            });
-          }
+      const trackList = dataEntity.trackList || (dataEntity.type === 'track' ? [dataEntity] : []);
+      for (let i = 0; i < trackList.length; i++) {
+        const item = trackList[i];
+        const trackTitle = item.title || item.name;
+        const artistName = item.subtitle || item.artists?.[0]?.name || (Array.isArray(item.artists) ? item.artists.map(a => a.name).join(', ') : 'Unknown Artist');
+
+        if (trackTitle) {
+          tracks.push({
+            id: `sp_${item.uri?.replace('spotify:track:', '') || `${spotifyId}_${i}`}`,
+            title: trackTitle,
+            artist: artistName,
+            thumbnail: cover,
+            durationSeconds: Math.round((item.duration || 180000) / 1000),
+            source: 'spotify'
+          });
         }
       }
-    } catch (parseErr) {}
+    }
   }
 
-  // 3. Fallback: Search iTunes/SoundCloud by playlist title if tracks list is empty
+  // 3. Strict Check: NEVER return fake search results if tracks is 0
   if (tracks.length === 0) {
-    if (title && title !== 'פלייליסט ספוטיפיי' && title !== 'אלבום מיובא') {
-      const searchRes = await searchTracks(title, 15);
-      if (searchRes.length > 0) {
-        return {
-          id: `pl_sp_${Date.now()}`,
-          title,
-          cover: cover || searchRes[0].thumbnail,
-          type: 'Imported Playlist',
-          tracks: searchRes
-        };
-      }
-    }
-
-    throw new Error('לא הצלחנו לייבא את השירים מקישור זה. ודא שהקישור של הפלייליסט ב-Spotify מוגדר כציבורי (Public).');
+    throw new Error('לא הצלחנו לחלץ את השירים המקוריים מהפלייליסט. ודא שהפלייליסט ב-Spotify מוגדר כציבורי (Public) ושלא הועתק קישור מקוצר/פרטי.');
   }
 
   return {
@@ -196,3 +211,4 @@ async function importYouTubePlaylist(url) {
     tracks
   };
 }
+
