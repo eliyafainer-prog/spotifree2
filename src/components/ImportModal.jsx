@@ -7,7 +7,7 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
   const [tab, setTab] = useState('text'); // Default to fast text importer
   const [url, setUrl] = useState('');
   const [textList, setTextList] = useState('');
-  const [playlistTitle, setPlaylistTitle] = useState('שירים שאני אוהב');
+  const [playlistTitle, setPlaylistTitle] = useState('');
   const [loading, setLoading] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [error, setError] = useState('');
@@ -68,7 +68,7 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
 
       setPreview({
         id: `pl_text_${Date.now()}`,
-        title: playlistTitle.trim() || 'שירים שאני אוהב',
+        title: playlistTitle.trim() || 'פלייליסט חדש',
         cover: foundTracks[0]?.thumbnail || '',
         type: 'Custom Playlist',
         tracks: foundTracks
@@ -154,7 +154,7 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
                 type="text"
                 value={playlistTitle}
                 onChange={(e) => setPlaylistTitle(e.target.value)}
-                placeholder="שירים שאני אוהב"
+                placeholder="תן שם לפלייליסט (למשל: הפלייליסט שלי)"
                 className="w-full bg-spotify-elevated text-white text-sm px-3.5 py-2.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none"
               />
             </div>
@@ -167,11 +167,11 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
                 rows={6}
                 value={textList}
                 onChange={(e) => setTextList(e.target.value)}
-                placeholder={'עומר אדם - הכל וכלום בבת אחת\nIcona Pop - THIS IS\nMichael Jackson - Thriller\nפסטיגל 2005 - גיבורי הממלכה\nפסטיגל 2008'}
+                placeholder={'הדבק שמות שירים כאן\nלמשל:\nשם שיר 1\nשם שיר 2\nשם שיר 3'}
                 className="w-full bg-spotify-elevated text-white text-sm p-3.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none font-sans"
               />
               <p className="text-[11px] text-spotify-subtext mt-1">
-                💡 טיפ: העתק רשימת שירים מספוטיפיי, ווטסאפ או פתקים – המערכת תאתר ותייבא את כולם אוטומטית!
+                💡 טיפ: העתק רשימת שירים מכל מקום – המערכת תאתר ותייבא את כולם אוטומטית!
               </p>
             </div>
 

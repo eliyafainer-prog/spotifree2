@@ -42,8 +42,22 @@ export function getPlaylists() {
     const raw = localStorage.getItem(PLAYLISTS_KEY);
     let list = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(list)) list = [];
-    // Filter out any previously injected mock playlist
-    const filtered = list.filter(p => p.id !== 'pl_songs_i_love_default');
+    
+    // Automatically purge old mock/fake playlists (including any old imports with fake tracks)
+    const filtered = list.filter(p => {
+      if (!p) return false;
+      if (p.id === 'pl_songs_i_love_default') return false;
+      if (p.tracks && p.tracks.some(t => 
+        t.artist === 'Amitai Kurtz' || 
+        t.artist === 'ORIN MORDECHAI' || 
+        t.title?.includes('פואץ') ||
+        t.id?.startsWith('sp_default_')
+      )) {
+        return false;
+      }
+      return true;
+    });
+
     if (filtered.length !== list.length) {
       localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(filtered));
     }
