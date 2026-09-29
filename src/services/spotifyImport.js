@@ -183,32 +183,105 @@ async function importSpotifyPlaylist(rawUrl) {
 }
 
 /**
- * Import YouTube Playlist
+ * Import YouTube Playlist or Video
  */
 async function importYouTubePlaylist(url) {
-  const videoMatch = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([^#&?]+)/);
-  const title = 'פלייליסט יוטיוב';
-  const cover = '';
+  const playlistMatch = url.match(/[?&]list=([^#&?]+)/);
+  if (playlistMatch) {
+    const playlistId = playlistMatch[1];
+    const invidiousHosts = [
+      'https://inv.nadeko.net',
+      'https://invidious.nerdvpn.de',
+      'https://vid.puffyan.us',
+      'https://yt.artemislena.eu'
+    ];
 
-  const tracks = [];
+    for (const host of invidiousHosts) {
+      try {
+        const res = await fetch(`${host}/api/v1/playlists/${playlistId}`);
+        if (res.ok) {
+          const data = await res.json();
+          const videos = data.videos || [];
+          if (videos.length > 0) {
+            return {
+              id: `pl_yt_${Date.now()}`,
+              title: data.title || 'פלייליסט יוטיוב',
+              cover: videos[0]?.videoThumbnails?.[0]?.url || `https://i.ytimg.com/vi/${videos[0]?.videoId}/hqdefault.jpg`,
+              type: 'YouTube Playlist',
+              tracks: videos.map((v, i) => ({
+                id: `yt_${v.videoId || i}`,
+                title: v.title,
+                artist: v.author || 'YouTube',
+                thumbnail: v.videoThumbnails?.[0]?.url || `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+                durationSeconds: v.lengthSeconds || 200,
+                source: 'youtube'
+              }))
+            };
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // Single video fallback
+  const videoMatch = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([^#&?]+)/);
   if (videoMatch) {
     const videoId = videoMatch[1];
-    tracks.push({
-      id: `yt_${videoId}`,
-      title: 'YouTube Track',
-      artist: 'YouTube',
-      thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-      durationSeconds: 200,
-      source: 'youtube'
-    });
+    return {
+      id: `pl_yt_${Date.now()}`,
+      title: 'שיר מיוטיוב',
+      cover: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      type: 'YouTube Video',
+      tracks: [{
+        id: `yt_${videoId}`,
+        title: 'YouTube Track',
+        artist: 'YouTube',
+        thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        durationSeconds: 200,
+        source: 'youtube'
+      }]
+    };
+  }
+
+  throw new Error('לא זוהה קישור תקין לפלייליסט או שיר מיוטיוב');
+}
+
+/**
+ * Import Playlist from plain text list of song names
+ */
+export async function importPlaylistFromTextList(title, textList, onProgress) {
+  const lines = textList
+    .split('\n')
+    .map(l => l.replace(/^\d+[\.\)\-:]\s*/, '').trim())
+    .filter(l => l.length > 1);
+
+  if (lines.length === 0) {
+    throw new Error('נא להזין לפחות שם שיר אחד');
+  }
+
+  const foundTracks = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (onProgress) onProgress(i + 1, lines.length, line);
+    try {
+      const results = await searchTracks(line, 1);
+      if (results && results.length > 0) {
+        foundTracks.push(results[0]);
+      }
+    } catch (e) {}
+  }
+
+  if (foundTracks.length === 0) {
+    throw new Error('לא נמצאו קטעי שמע תואמים לשמות שהוזנו');
   }
 
   return {
-    id: `pl_yt_${Date.now()}`,
-    title,
-    cover,
-    type: 'YouTube Playlist',
-    tracks
+    id: `pl_custom_${Date.now()}`,
+    title: title.trim() || 'שירים שאני אוהב',
+    cover: foundTracks[0]?.thumbnail || '',
+    type: 'Custom Playlist',
+    tracks: foundTracks
   };
 }
+
 
