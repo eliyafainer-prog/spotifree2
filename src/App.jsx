@@ -313,7 +313,7 @@ export default function App() {
   const isLikedPlaylist = currentView === 'liked';
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-spotify-base text-white overflow-hidden select-none font-sans" dir="rtl">
+    <div className="flex flex-col h-[100dvh] w-full max-w-full bg-spotify-base text-white overflow-hidden select-none font-sans" dir="rtl">
       {/* Main Layout Area */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left Desktop Sidebar */}
@@ -418,7 +418,7 @@ export default function App() {
                       <Clock className="w-5 h-5 text-spotify-green" />
                       <h2>הושמע לאחרונה</h2>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 md:gap-4">
                       {recentTracks.slice(0, 6).map((track, idx) => (
                         <div
                           key={track.id || idx}
@@ -456,7 +456,7 @@ export default function App() {
                       <span>טוען להיטים מומלצים...</span>
                     </div>
                   ) : (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 md:gap-4">
                       {trendingTracks.map((track, idx) => (
                         <div
                           key={track.id || idx}

@@ -7,17 +7,20 @@
     color-scheme: dark;
   }
   
-  html, body {
+  html, body, #root {
     margin: 0;
     padding: 0;
     width: 100%;
     height: 100%;
+    height: 100dvh;
+    overflow: hidden;
     background-color: #121212;
     color: #ffffff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     user-select: none;
     -webkit-user-select: none;
     -webkit-tap-highlight-color: transparent;
+    touch-action: pan-y;
   }
 
   /* Custom Spotify Smooth Scrollbar */

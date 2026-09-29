@@ -3,7 +3,7 @@ import { Home, Search, Library, PlusCircle, BarChart3 } from 'lucide-react';
 
 export function MobileNav({ currentView, setCurrentView, openImportModal, setSelectedPlaylistId }) {
   return (
-    <nav className="md:hidden flex items-center justify-around bg-spotify-dark/95 backdrop-blur-md border-t border-spotify-border h-16 px-2 z-40 select-none">
+    <nav className="md:hidden flex items-center justify-around bg-spotify-dark/95 backdrop-blur-md border-t border-spotify-border h-16 px-2 z-40 select-none flex-shrink-0">
       <button
         onClick={() => {
           setCurrentView('home');
