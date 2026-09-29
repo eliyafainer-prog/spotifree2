@@ -115,24 +115,38 @@ async function importSpotifyPlaylist(rawUrl) {
     }
   } catch (e) {}
 
-  // 2. Fetch Embed HTML (direct fetch + proxy fallbacks)
+  // 2. Fetch Embed HTML with rock-solid browser CORS proxying
   let html = '';
-  const fetchUrls = [
-    embedUrl,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(embedUrl)}`,
-    `https://corsproxy.io/?${encodeURIComponent(embedUrl)}`,
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(embedUrl)}`
-  ];
 
-  for (const fetchUrl of fetchUrls) {
+  // Strategy A: allorigins JSON proxy (Always sets Access-Control-Allow-Origin: * in browser)
+  try {
+    const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(embedUrl)}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.contents && data.contents.length > 500) {
+        html = data.contents;
+      }
+    }
+  } catch (e) {}
+
+  // Strategy B: allorigins RAW proxy
+  if (!html) {
     try {
-      const res = await fetch(fetchUrl);
+      const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(embedUrl)}`);
       if (res.ok) {
         const text = await res.text();
-        if (text && text.length > 500) {
-          html = text;
-          break;
-        }
+        if (text && text.length > 500) html = text;
+      }
+    } catch (e) {}
+  }
+
+  // Strategy C: Direct fetch (for local dev / environments with direct access)
+  if (!html) {
+    try {
+      const res = await fetch(embedUrl);
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.length > 500) html = text;
       }
     } catch (e) {}
   }

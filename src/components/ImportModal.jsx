@@ -4,7 +4,7 @@ import { importPlaylistFromUrl } from '../services/spotifyImport';
 import { searchTracks } from '../services/directAudio';
 
 export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
-  const [tab, setTab] = useState('text'); // Default to fast text importer
+  const [tab, setTab] = useState('link'); // Default to URL Link import
   const [url, setUrl] = useState('');
   const [textList, setTextList] = useState('');
   const [playlistTitle, setPlaylistTitle] = useState('');
@@ -21,14 +21,14 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
 
     setLoading(true);
     setError('');
-    setProgressMsg('מפענח קישור...');
+    setProgressMsg('מפענח קישור ומייבא שירים...');
     setPreview(null);
 
     try {
       const result = await importPlaylistFromUrl(url.trim());
       setPreview(result);
     } catch (err) {
-      setError(err.message || 'נכשל פיענוח הקישור. מומלץ להשתמש בלשונית הדבקת שמות שירים.');
+      setError(err.message || 'נכשל פיענוח הקישור. ודא שהפלייליסט תקין.');
     } finally {
       setLoading(false);
       setProgressMsg('');
@@ -101,6 +101,7 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
   };
 
   const sampleYouTubeUrl = 'https://www.youtube.com/playlist?list=PLMC9KNkIncKtPzgY-5rmhvj7fax8fdxoj';
+  const sampleSpotifyUrl = 'https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -124,26 +125,71 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
         {/* Tab Switcher */}
         <div className="flex gap-2 p-1 bg-spotify-elevated rounded-lg border border-spotify-border">
           <button
-            onClick={() => { setTab('text'); setError(''); setPreview(null); }}
-            className={`flex-1 py-2 px-3 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-              tab === 'text' ? 'bg-spotify-green text-black shadow-md' : 'text-spotify-subtext hover:text-white'
-            }`}
-          >
-            <ListPlus className="w-4 h-4" />
-            <span>הדבקת שמות שירים (מומלץ)</span>
-          </button>
-          <button
             onClick={() => { setTab('link'); setError(''); setPreview(null); }}
             className={`flex-1 py-2 px-3 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
               tab === 'link' ? 'bg-spotify-green text-black shadow-md' : 'text-spotify-subtext hover:text-white'
             }`}
           >
             <Link2 className="w-4 h-4" />
-            <span>קישור יוטיוב / ספוטיפיי</span>
+            <span>הזנת קישור ספוטיפיי / יוטיוב</span>
+          </button>
+          <button
+            onClick={() => { setTab('text'); setError(''); setPreview(null); }}
+            className={`flex-1 py-2 px-3 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+              tab === 'text' ? 'bg-spotify-green text-black shadow-md' : 'text-spotify-subtext hover:text-white'
+            }`}
+          >
+            <ListPlus className="w-4 h-4" />
+            <span>רשימת שירים ידנית</span>
           </button>
         </div>
 
-        {/* Tab 1 (Default): Fast Text List Import */}
+        {/* Tab 1 (Default): Link Import */}
+        {tab === 'link' && (
+          <form onSubmit={handleFetchLink} className="flex flex-col gap-3">
+            <label className="text-xs font-semibold text-spotify-subtext">
+              הדבק כאן קישור לפלייליסט מספוטיפיי או מיוטיוב:
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="https://open.spotify.com/playlist/... או יוטיוב"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                autoFocus
+                className="flex-1 bg-spotify-elevated text-white text-sm px-3.5 py-2.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none transition-colors"
+              />
+              <button
+                type="submit"
+                disabled={loading || !url.trim()}
+                className="bg-spotify-green hover:bg-spotify-green-hover disabled:opacity-50 text-black font-bold px-5 py-2 rounded-lg text-sm transition-all flex items-center gap-2"
+              >
+                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'טען'}
+              </button>
+            </div>
+
+            {loading && progressMsg && (
+              <p className="text-xs text-spotify-green animate-pulse flex items-center gap-1.5">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>{progressMsg}</span>
+              </p>
+            )}
+
+            <div className="text-[11px] text-spotify-subtext flex items-center gap-2 mt-1">
+              <Sparkles className="w-3.5 h-3.5 text-spotify-green" />
+              <span>דוגמה:</span>
+              <button
+                type="button"
+                onClick={() => setUrl(sampleSpotifyUrl)}
+                className="text-spotify-green underline hover:text-spotify-green-hover"
+              >
+                Today's Top Hits (Spotify)
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Tab 2: Manual Text List Import */}
         {tab === 'text' && (
           <form onSubmit={handleFetchTextList} className="flex flex-col gap-3">
             <div>
@@ -161,18 +207,15 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
 
             <div>
               <label className="text-xs font-semibold text-spotify-subtext block mb-1">
-                הדבק כאן את שמות השירים שלך (שיר אחד בכל שורה):
+                הדבק כאן את שמות השירים (שיר אחד בכל שורה):
               </label>
               <textarea
                 rows={6}
                 value={textList}
                 onChange={(e) => setTextList(e.target.value)}
-                placeholder={'הדבק שמות שירים כאן\nלמשל:\nשם שיר 1\nשם שיר 2\nשם שיר 3'}
+                placeholder={'שם שיר 1\nשם שיר 2\nשם שיר 3'}
                 className="w-full bg-spotify-elevated text-white text-sm p-3.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none font-sans"
               />
-              <p className="text-[11px] text-spotify-subtext mt-1">
-                💡 טיפ: העתק רשימת שירים מכל מקום – המערכת תאתר ותייבא את כולם אוטומטית!
-              </p>
             </div>
 
             <button
@@ -186,50 +229,9 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
                   <span>{progressMsg || 'מאתר ומייבא שירים...'}</span>
                 </>
               ) : (
-                'חפש וצור פלייליסט עכשיו'
+                'חפש וצור פלייליסט'
               )}
             </button>
-          </form>
-        )}
-
-        {/* Tab 2: URL Import (YouTube & Spotify) */}
-        {tab === 'link' && (
-          <form onSubmit={handleFetchLink} className="flex flex-col gap-3">
-            <label className="text-xs font-semibold text-spotify-subtext">
-              הדבק קישור מיוטיוב או ספוטיפיי:
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="https://www.youtube.com/playlist?list=..."
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                className="flex-1 bg-spotify-elevated text-white text-sm px-3.5 py-2.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none transition-colors"
-              />
-              <button
-                type="submit"
-                disabled={loading || !url.trim()}
-                className="bg-spotify-green hover:bg-spotify-green-hover disabled:opacity-50 text-black font-bold px-5 py-2 rounded-lg text-sm transition-all flex items-center gap-2"
-              >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'טען'}
-              </button>
-            </div>
-
-            <div className="text-[11px] text-spotify-subtext flex items-center gap-1.5 mt-1">
-              <Sparkles className="w-3.5 h-3.5 text-spotify-green" />
-              <span>דוגמת קישור יוטיוב:</span>
-              <button
-                type="button"
-                onClick={() => setUrl(sampleYouTubeUrl)}
-                className="text-spotify-green underline hover:text-spotify-green-hover truncate max-w-xs"
-              >
-                Pop Music Playlist (YouTube)
-              </button>
-            </div>
-
-            <div className="p-2.5 bg-white/5 rounded-lg border border-white/10 text-[11px] text-spotify-subtext">
-              📌 שים לב: פלייליסטים אישיים בספוטיפיי מוגנים על ידי ספוטיפיי מחילוץ חיצוני. עבור ספוטיפיי, מומלץ להשתמש בלשונית <strong>הדבקת שמות שירים</strong>!
-            </div>
           </form>
         )}
 
