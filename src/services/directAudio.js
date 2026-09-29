@@ -30,7 +30,7 @@ export async function resolveYouTubeVideo(title, artist = '') {
     return videoIdCache.get(key);
   }
 
-  // Also check localStorage for persistent fast load
+  // Also check localStorage for persistent instant load
   try {
     const stored = localStorage.getItem(`spotifree_yt_${key}`);
     if (stored) {
@@ -42,44 +42,72 @@ export async function resolveYouTubeVideo(title, artist = '') {
     }
   } catch (e) {}
 
-  const cleanQuery = `${title} ${artist}`
-    .replace(/[\(\[\{].*?[\)\]\}]/g, '') // remove parenthesized content like (feat. X)
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .trim();
+  const cleanTitle = (title || '').replace(/[\(\[\{].*?[\)\]\}]/g, '').trim();
+  const cleanArtist = (artist || '').replace(/[\(\[\{].*?[\)\]\}]/g, '').trim();
 
-  const searchQuery = cleanQuery || `${title} ${artist}`;
+  const queries = [
+    `${cleanTitle} ${cleanArtist}`.trim(),
+    `${title} ${artist}`.trim(),
+    cleanTitle
+  ].filter(Boolean);
 
-  // Try Invidious instances sequentially
-  for (const base of INVIDIOUS_INSTANCES) {
-    try {
-      const url = `${base}/api/v1/search?q=${encodeURIComponent(searchQuery)}&type=video`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
-      if (res.ok) {
-        const items = await res.json();
-        if (Array.isArray(items) && items.length > 0) {
-          // Find first track that isn't a 1-hour mix (duration < 15 mins) and isn't a 10s preview (> 45s)
-          const valid = items.find(it => it.lengthSeconds >= 45 && it.lengthSeconds <= 900) || items[0];
-          if (valid && valid.videoId) {
-            const result = {
-              videoId: valid.videoId,
-              durationSeconds: valid.lengthSeconds || 200,
-              title: valid.title,
-              thumbnail: `https://i.ytimg.com/vi/${valid.videoId}/hqdefault.jpg`
-            };
+  // Strategy 1: Try Invidious with generous 7s timeout
+  for (const q of queries) {
+    for (const base of INVIDIOUS_INSTANCES) {
+      try {
+        const url = `${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(6500) });
+        if (res.ok) {
+          const items = await res.json();
+          if (Array.isArray(items) && items.length > 0) {
+            const valid = items.find(it => it.lengthSeconds >= 45 && it.lengthSeconds <= 900) || items[0];
+            if (valid && valid.videoId) {
+              const result = {
+                videoId: valid.videoId,
+                durationSeconds: valid.lengthSeconds || 210,
+                title: valid.title,
+                thumbnail: `https://i.ytimg.com/vi/${valid.videoId}/hqdefault.jpg`
+              };
 
-            videoIdCache.set(key, result);
-            try {
-              localStorage.setItem(`spotifree_yt_${key}`, JSON.stringify(result));
-            } catch (e) {}
+              videoIdCache.set(key, result);
+              try {
+                localStorage.setItem(`spotifree_yt_${key}`, JSON.stringify(result));
+              } catch (e) {}
 
-            return result;
+              return result;
+            }
           }
         }
+      } catch (err) {
+        // Try next instance / query
       }
-    } catch (err) {
-      // Continue to next instance
     }
   }
+
+  // Strategy 2: Fallback via AllOrigins YouTube scraper
+  try {
+    const scrapeQuery = `${cleanTitle} ${cleanArtist}`.trim();
+    const ytUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(scrapeQuery)}`;
+    const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(ytUrl)}`, { signal: AbortSignal.timeout(6000) });
+    if (res.ok) {
+      const data = await res.json();
+      const html = data?.contents || '';
+      const match = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+      if (match && match[1]) {
+        const result = {
+          videoId: match[1],
+          durationSeconds: 210,
+          title: `${title} - ${artist}`,
+          thumbnail: `https://i.ytimg.com/vi/${match[1]}/hqdefault.jpg`
+        };
+        videoIdCache.set(key, result);
+        try {
+          localStorage.setItem(`spotifree_yt_${key}`, JSON.stringify(result));
+        } catch (e) {}
+        return result;
+      }
+    }
+  } catch (e) {}
 
   return null;
 }
@@ -97,7 +125,7 @@ export async function searchTracks(query, limit = 24) {
   for (const base of INVIDIOUS_INSTANCES) {
     try {
       const url = `${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(3200) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(6500) });
       if (res.ok) {
         const items = await res.json();
         if (Array.isArray(items) && items.length > 0) {
@@ -113,10 +141,10 @@ export async function searchTracks(query, limit = 24) {
     }
   }
 
-  // 2. Secondary fallback: iTunes Search API (Ultra-crisp metadata)
+  // 2. Secondary fallback: iTunes Search API (Ultra-crisp metadata, NO 30s previews)
   try {
     const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=${limit}`;
-    const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(3000) });
+    const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(4000) });
     if (res.ok) {
       const data = await res.json();
       const results = data.results || [];
@@ -165,6 +193,7 @@ function normalizeInvidiousTrack(item) {
 
 /**
  * Normalizes iTunes track to standard SpotiFree Track model
+ * NOTE: Preview URLs are deliberately excluded to prevent 30s cap!
  */
 function normalizeItunesTrack(item) {
   let thumbnail = item.artworkUrl100 || '';
@@ -181,7 +210,6 @@ function normalizeItunesTrack(item) {
     album: item.collectionName || '',
     thumbnail,
     durationSeconds,
-    previewUrl: item.previewUrl || '',
     source: 'itunes',
     rawTrack: item
   };
@@ -205,15 +233,12 @@ export async function getTrendingTracks(limit = 18) {
 }
 
 /**
- * Direct audio fallback resolver
+ * Direct audio fallback resolver (Audius only, NEVER 30s previews)
  */
 export async function getPlayableAudioUrl(track) {
   if (!track) throw new Error('No track provided');
 
-  // If track has an offline blob or direct preview
-  if (track.previewUrl) return track.previewUrl;
-
-  // Audius stream fallback
+  // Audius full stream fallback
   try {
     const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(track.title + ' ' + (track.artist || ''))}&app_name=SpotiFree`);
     if (audiusRes.ok) {
@@ -225,5 +250,5 @@ export async function getPlayableAudioUrl(track) {
     }
   } catch (e) {}
 
-  return track.previewUrl || '';
+  return '';
 }
