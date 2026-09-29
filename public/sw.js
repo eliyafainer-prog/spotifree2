@@ -1,19 +1,17 @@
 // SpotiFree PWA Service Worker for Mobile Caching & Background Audio
-const CACHE_NAME = 'spotifree-v2-cache-v1';
+const CACHE_NAME = 'spotifree-v2-cache-v2';
 const ASSETS_TO_CACHE = [
-  '/',
-  '/index.html',
-  '/manifest.webmanifest',
-  '/icons/music-icon.svg',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png'
+  './',
+  './index.html',
+  './manifest.webmanifest',
+  './icons/music-icon.svg'
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       return cache.addAll(ASSETS_TO_CACHE);
-    })
+    }).catch(() => {})
   );
   self.skipWaiting();
 });
@@ -30,7 +28,6 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // Pass audio CDN streams directly without caching overhead
   if (event.request.url.includes('sndcdn.com') || event.request.url.includes('audius.co')) {
     return;
   }
