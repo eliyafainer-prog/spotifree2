@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/api/sc", "destination": "/api/sc.js" },
+    { "source": "/api-sc/(.*)", "destination": "https://api-v2.soundcloud.com/$1" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

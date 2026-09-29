@@ -1,0 +1,14 @@
+{
+  "appId": "com.spotifree.app",
+  "appName": "SpotiFree",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "AndroidForegroundService": {
+      "notificationTitle": "SpotiFree מנגן ברקע",
+      "notificationText": "SpotiFree פעיל"
+    }
+  }
+}
