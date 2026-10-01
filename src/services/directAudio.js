@@ -2,10 +2,7 @@
 // 100% Free, ZERO Ads, True Mobile Background Playback, Full 3-5 Minute Songs!
 
 const INVIDIOUS_INSTANCES = [
-  'https://invidious.f5.si',
-  'https://inv.nadeko.net',
-  'https://iv.ggtyler.dev',
-  'https://invidious.nerdvpn.de'
+  'https://invidious.f5.si'
 ];
 
 // In-memory cache for resolved audio stream URLs
@@ -21,35 +18,44 @@ function getCacheKey(title, artist = '') {
  */
 export async function searchTracks(query, limit = 24) {
   if (!query || !query.trim()) return [];
-
   const q = query.trim();
 
-  // 1. Primary: YouTube / Invidious Search (Hebrew, Pop, Remixes, Live, Underground)
-  for (const base of INVIDIOUS_INSTANCES) {
-    try {
-      const url = `${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
-      if (res.ok) {
-        const items = await res.json();
-        if (Array.isArray(items) && items.length > 0) {
-          const songs = items.filter(it => it.lengthSeconds >= 40 && it.lengthSeconds <= 900);
-          const chosen = songs.length > 0 ? songs : items;
-          return chosen.slice(0, limit).map(item => normalizeInvidiousTrack(item));
-        }
-      }
-    } catch (e) {}
-  }
-
-  // 2. Secondary fallback: iTunes Search API (Crisp metadata)
+  // 1. Primary: iTunes Search API for crisp, high-quality metadata
   try {
     const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=${limit}`;
-    const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(4000) });
+    const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(5000) });
     if (res.ok) {
       const data = await res.json();
       const results = data.results || [];
-      return results.map(item => normalizeItunesTrack(item));
+      if (results.length > 0) {
+        return results.map(item => normalizeItunesTrack(item));
+      }
     }
-  } catch (e) {}
+  } catch (e) {
+    console.warn('iTunes search failed:', e);
+  }
+
+  // 2. Secondary fallback: YouTube / Invidious Search
+  try {
+    const fetchPromises = INVIDIOUS_INSTANCES.map(base =>
+      fetch(`${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`, { signal: AbortSignal.timeout(5000) })
+        .then(async res => {
+          if (!res.ok) throw new Error('Not ok');
+          const items = await res.json();
+          if (!Array.isArray(items) || items.length === 0) throw new Error('Empty');
+          return items;
+        })
+    );
+    
+    const items = await Promise.any(fetchPromises);
+    // Strict filter: must have a videoId and not be a channel or playlist item
+    const videoItems = items.filter(it => (it.type === 'video' || !it.type) && it.videoId);
+    const songs = videoItems.filter(it => it.lengthSeconds >= 40 && it.lengthSeconds <= 900);
+    const chosen = songs.length > 0 ? songs : videoItems;
+    return chosen.slice(0, limit).map(item => normalizeInvidiousTrack(item));
+  } catch (e) {
+    console.warn('Invidious search failed:', e);
+  }
 
   return [];
 }
@@ -86,32 +92,37 @@ export async function resolveYouTubeVideo(title, artist = '') {
   ].filter(Boolean);
 
   for (const q of queries) {
-    for (const base of INVIDIOUS_INSTANCES) {
-      try {
-        const url = `${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`;
-        const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
-        if (res.ok) {
-          const items = await res.json();
-          if (Array.isArray(items) && items.length > 0) {
-            const valid = items.find(it => it.lengthSeconds >= 45 && it.lengthSeconds <= 900) || items[0];
-            if (valid && valid.videoId) {
-              const result = {
-                videoId: valid.videoId,
-                durationSeconds: valid.lengthSeconds || 210,
-                title: valid.title,
-                thumbnail: `https://i.ytimg.com/vi/${valid.videoId}/hqdefault.jpg`
-              };
+    try {
+      const fetchPromises = INVIDIOUS_INSTANCES.map(base =>
+        fetch(`${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`, { signal: AbortSignal.timeout(5000) })
+          .then(async res => {
+            if (!res.ok) throw new Error('Not ok');
+            const items = await res.json();
+            if (!Array.isArray(items) || items.length === 0) throw new Error('Empty');
+            return items;
+          })
+      );
+      
+      const items = await Promise.any(fetchPromises);
+      const videoItems = items.filter(it => (it.type === 'video' || !it.type) && it.videoId);
+      const valid = videoItems.find(it => it.lengthSeconds >= 45 && it.lengthSeconds <= 900) || videoItems[0];
+      if (valid && valid.videoId) {
+        const result = {
+          videoId: valid.videoId,
+          durationSeconds: valid.lengthSeconds || 210,
+          title: valid.title,
+          thumbnail: `https://i.ytimg.com/vi/${valid.videoId}/hqdefault.jpg`
+        };
 
-              videoIdCache.set(key, result);
-              try {
-                localStorage.setItem(`spotifree_yt_${key}`, JSON.stringify(result));
-              } catch (e) {}
+        videoIdCache.set(key, result);
+        try {
+          localStorage.setItem(`spotifree_yt_${key}`, JSON.stringify(result));
+        } catch (e) {}
 
-              return result;
-            }
-          }
-        }
-      } catch (err) {}
+        return result;
+      }
+    } catch (err) {
+      console.warn(`Resolution failed for query: ${q}`);
     }
   }
 
@@ -122,7 +133,7 @@ export async function resolveYouTubeVideo(title, artist = '') {
  * Resolves a DIRECT, AD-FREE audio stream URL (MP4 / M4A / WebM / MP3)
  * Plays in pure HTML5 <audio> with zero ads and true background playback!
  */
-export async function getPlayableAudioUrl(track) {
+export async function getPlayableAudioUrl(track, signal) {
   if (!track) throw new Error('No track provided');
 
   // Check in-memory cache
@@ -149,35 +160,44 @@ export async function getPlayableAudioUrl(track) {
     }
   }
 
-  // 2. Fetch direct audio stream URL from Invidious adaptive formats (0% ads, high bitrate AAC)
+  // 2. Fetch direct audio stream URL from Invidious adaptive formats concurrently
   if (videoId) {
-    for (const base of INVIDIOUS_INSTANCES) {
-      try {
-        const res = await fetch(`${base}/api/v1/videos/${videoId}`, { signal: AbortSignal.timeout(6500) });
-        if (res.ok) {
-          const data = await res.json();
-          const audio = data.adaptiveFormats?.find(f => f.container === 'm4a' && f.url) ||
-                        data.adaptiveFormats?.find(f => f.type?.includes('audio') && f.url);
-          if (audio && audio.url) {
-            audioStreamCache.set(track.id, {
-              url: audio.url,
-              expiresAt: Date.now() + 4 * 60 * 60 * 1000
-            });
-            return audio.url;
-          }
-        }
-      } catch (e) {}
+    try {
+      const fetchPromises = INVIDIOUS_INSTANCES.map(base =>
+        fetch(`${base}/api/v1/videos/${videoId}`, { signal: signal || AbortSignal.timeout(5000) })
+          .then(async res => {
+            if (!res.ok) throw new Error('Not ok');
+            const data = await res.json();
+            const audio = data.adaptiveFormats?.find(f => f.container === 'm4a' && f.url) ||
+                          data.adaptiveFormats?.find(f => f.type?.includes('audio') && f.url);
+            if (audio && audio.url) return audio.url;
+            throw new Error('No audio');
+          })
+      );
+      
+      const audioUrl = await Promise.any(fetchPromises);
+      if (audioUrl) {
+        audioStreamCache.set(track.id, {
+          url: audioUrl,
+          expiresAt: Date.now() + 4 * 60 * 60 * 1000
+        });
+        return audioUrl;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      console.warn('Concurrent fetch for audio streams failed', e);
     }
 
     // 3. Fallback: Invidious direct audio stream endpoint
-    const proxyStream = `https://invidious.f5.si/latest_version?id=${videoId}&itag=140`;
+    const randomInstance = INVIDIOUS_INSTANCES[Math.floor(Math.random() * INVIDIOUS_INSTANCES.length)];
+    const proxyStream = `${randomInstance}/latest_version?id=${videoId}&itag=140`;
     audioStreamCache.set(track.id, { url: proxyStream, expiresAt: Date.now() + 2 * 60 * 60 * 1000 });
     return proxyStream;
   }
 
   // 4. Fallback: Audius full MP3 stream
   try {
-    const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(track.title + ' ' + (track.artist || ''))}&app_name=SpotiFree`, { signal: AbortSignal.timeout(4000) });
+    const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(track.title + ' ' + (track.artist || ''))}&app_name=SpotiFree`, { signal: signal || AbortSignal.timeout(4000) });
     if (audiusRes.ok) {
       const audiusData = await audiusRes.json();
       const first = audiusData.data?.[0];
@@ -187,7 +207,9 @@ export async function getPlayableAudioUrl(track) {
         return audiusUrl;
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+  }
 
   throw new Error('לא ניתן היה לטעון את קטע השמע. נא לנסות שיר אחר.');
 }

@@ -12,7 +12,8 @@ import {
   Loader2,
   ArrowDownCircle,
   BarChart3,
-  Library
+  Library,
+  Trash2
 } from 'lucide-react';
 
 import { useAudioPlayer } from './hooks/useAudioPlayer';
@@ -64,6 +65,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [isSearchFocused, setIsSearchFocused] = useState(false);
 
   // Trending tracks for Home view
   const [trendingTracks, setTrendingTracks] = useState([]);
@@ -183,15 +185,23 @@ export default function App() {
       return;
     }
 
+    let ignore = false;
     const timer = setTimeout(() => {
       setIsSearching(true);
       searchTracks(trimmed, 24)
-        .then(results => setSearchResults(results))
+        .then(results => {
+          if (!ignore) setSearchResults(results);
+        })
         .catch(err => console.warn('Search error:', err))
-        .finally(() => setIsSearching(false));
+        .finally(() => {
+          if (!ignore) setIsSearching(false);
+        });
     }, 300);
 
-    return () => clearTimeout(timer);
+    return () => {
+      ignore = true;
+      clearTimeout(timer);
+    };
   }, [searchQuery, currentView]);
 
   // Immediate Search submit on Enter
@@ -313,9 +323,9 @@ export default function App() {
   const isLikedPlaylist = currentView === 'liked';
 
   return (
-    <div className="flex flex-col h-[100dvh] w-full max-w-full bg-spotify-base text-white overflow-hidden select-none font-sans" dir="rtl">
+    <div className="flex flex-col h-full w-full max-w-full bg-spotify-base text-white overflow-hidden select-none font-sans" dir="rtl">
       {/* Main Layout Area */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden min-h-0">
         {/* Left Desktop Sidebar */}
         <Sidebar
           currentView={currentView}
@@ -338,6 +348,8 @@ export default function App() {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
+                    onFocus={() => setIsSearchFocused(true)}
+                    onBlur={() => setIsSearchFocused(false)}
                     placeholder="איזה שיר, אמן או אלבום תרצה לשמוע?"
                     autoFocus
                     className="w-full bg-spotify-elevated hover:bg-spotify-highlight focus:bg-spotify-highlight text-white placeholder-spotify-subtext text-sm rounded-full py-2.5 pr-10 pl-4 border border-transparent focus:border-white/20 outline-none transition-all shadow-inner"
@@ -374,7 +386,7 @@ export default function App() {
           </div>
 
           {/* View Content Scrollable Area */}
-          <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-28">
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-6">
             {/* VIEW: HOME */}
             {currentView === 'home' && (
               <div className="flex flex-col gap-8 animate-fadeIn">
@@ -566,12 +578,23 @@ export default function App() {
                       }}
                       className="bg-spotify-dark hover:bg-spotify-elevated p-3 rounded-lg flex flex-col gap-2.5 cursor-pointer transition-colors group"
                     >
-                      <div className="aspect-square rounded-md overflow-hidden bg-spotify-highlight">
+                      <div className="relative aspect-square rounded-md overflow-hidden bg-spotify-highlight">
                         {pl.cover ? (
                           <img src={pl.cover} alt="" className="w-full h-full object-cover" />
                         ) : (
                           <Music2 className="w-10 h-10 m-auto text-spotify-subtext" />
                         )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeletePlaylist(pl.id);
+                            showToast(`הפלייליסט "${pl.title}" נמחק`);
+                          }}
+                          title="מחק פלייליסט"
+                          className="absolute top-2 left-2 p-1.5 rounded-full bg-black/60 hover:bg-red-600/90 text-white/80 hover:text-white transition-all opacity-80 md:opacity-0 md:group-hover:opacity-100 shadow"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                       <span className="font-bold text-sm text-white truncate">{pl.title}</span>
                       <span className="text-xs text-spotify-subtext">{pl.tracks?.length || 0} שירים</span>
@@ -682,12 +705,14 @@ export default function App() {
       />
 
       {/* Mobile Bottom Tab Bar */}
-      <MobileNav
-        currentView={currentView}
-        setCurrentView={setCurrentView}
-        openImportModal={() => setIsImportModalOpen(true)}
-        setSelectedPlaylistId={setSelectedPlaylistId}
-      />
+      {!isSearchFocused && (
+        <MobileNav
+          currentView={currentView}
+          setCurrentView={setCurrentView}
+          openImportModal={() => setIsImportModalOpen(true)}
+          setSelectedPlaylistId={setSelectedPlaylistId}
+        />
+      )}
 
       {/* Fullscreen Player (Mobile Swipe-up / Expanded View) */}
       <FullscreenPlayer

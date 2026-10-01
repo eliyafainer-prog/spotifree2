@@ -6,6 +6,9 @@ import { addRecentTrack } from '../services/storage';
 import { getOfflineTrack } from '../services/offlineStorage';
 import { recordTrackPlay, recordListeningSeconds } from '../services/analytics';
 
+// Inline Base64 44-byte silent WAV audio to guarantee 100% offline & safe mobile audio lock without 404s
+const SILENT_AUDIO_URI = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+
 const startNativeForeground = async (track) => {
   if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
     try {
@@ -78,6 +81,7 @@ export function useAudioPlayer() {
   const shuffledIndicesRef = useRef([]);
   const shufflePosRef = useRef(0);
   const userPausedRef = useRef(false);
+  const abortControllerRef = useRef(null);
 
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
@@ -103,6 +107,9 @@ export function useAudioPlayer() {
 
   // Initialize Permanent HTML5 Audio Element for Background Playback
   useEffect(() => {
+    let errorCount = 0;
+    let lastErrorTrackId = null;
+
     let audio = document.getElementById('spotifree-audio-engine');
     if (!audio) {
       audio = document.createElement('audio');
@@ -132,6 +139,7 @@ export function useAudioPlayer() {
     };
 
     const onPlaying = () => {
+      errorCount = 0;
       setIsPlaying(true);
       setIsLoading(false);
       requestWakeLock();
@@ -155,12 +163,33 @@ export function useAudioPlayer() {
     };
 
     const onError = (e) => {
+      // Ignore errors on data: URI or if audio source is empty
+      if (!audio.src || audio.src.startsWith('data:')) {
+        return;
+      }
+
       console.warn('Audio playback error:', e);
       setIsLoading(false);
-      // Auto-skip to next track if audio stream fails
+
+      const currentId = currentTrackRef.current?.id;
+      if (lastErrorTrackId === currentId) {
+        errorCount += 1;
+      } else {
+        lastErrorTrackId = currentId;
+        errorCount = 1;
+      }
+
+      if (errorCount >= 2) {
+        console.warn('Playback error threshold reached, halting');
+        return;
+      }
+
+      // Auto-skip to next track ONLY if genuine stream fails and current track is still active
       setTimeout(() => {
-        handleNextTrack();
-      }, 1200);
+        if (currentTrackRef.current?.id === currentId && !userPausedRef.current) {
+          handleNextTrack();
+        }
+      }, 1500);
     };
 
     audio.addEventListener('timeupdate', onTimeUpdate);
@@ -208,6 +237,12 @@ export function useAudioPlayer() {
     if (!track) return;
     userPausedRef.current = false;
 
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
+
     if (newQueue) {
       setQueue(newQueue);
       queueRef.current = newQueue;
@@ -236,6 +271,13 @@ export function useAudioPlayer() {
     recordTrackPlay(track);
 
     try {
+      // Hold the media session / audio lock on mobile by playing silence while fetching
+      if (audioRef.current) {
+        audioRef.current.src = SILENT_AUDIO_URI;
+        audioRef.current.loop = true;
+        await audioRef.current.play().catch(() => {});
+      }
+
       // 1. Check if downloaded offline
       const offline = await getOfflineTrack(track);
       let streamUrl = '';
@@ -244,19 +286,26 @@ export function useAudioPlayer() {
         streamUrl = URL.createObjectURL(offline.audioBlob);
       } else {
         // 2. Fetch direct ad-free audio stream
-        streamUrl = await getPlayableAudioUrl(track);
+        streamUrl = await getPlayableAudioUrl(track, signal);
       }
 
-      if (audioRef.current && !userPausedRef.current && streamUrl) {
+      if (currentTrackRef.current?.id !== track.id) return;
+
+      if (audioRef.current && streamUrl) {
+        audioRef.current.loop = false;
         audioRef.current.src = streamUrl;
         audioRef.current.currentTime = 0;
-        await audioRef.current.play();
-        setIsPlaying(true);
+        if (!userPausedRef.current) {
+          await audioRef.current.play();
+          setIsPlaying(true);
+        }
         setIsLoading(false);
       }
     } catch (err) {
-      console.warn('Playback error:', err);
-      setIsLoading(false);
+      if (err.name !== 'AbortError') {
+        console.warn('Playback error:', err);
+        setIsLoading(false);
+      }
     }
   }, []);
 
@@ -339,6 +388,17 @@ export function useAudioPlayer() {
     const currentIdx = queueIndexRef.current;
 
     if (!q || q.length === 0) return;
+
+    if (shuffleModeRef.current !== 'off') {
+      if (shufflePosRef.current > 0) {
+        shufflePosRef.current -= 1;
+      }
+      const prevIdx = shuffledIndicesRef.current[shufflePosRef.current];
+      if (prevIdx !== undefined && prevIdx >= 0 && prevIdx < q.length) {
+        playTrack(q[prevIdx], null, prevIdx);
+      }
+      return;
+    }
 
     let prevIdx = currentIdx - 1;
     if (prevIdx < 0) {

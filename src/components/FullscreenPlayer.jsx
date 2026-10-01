@@ -33,9 +33,9 @@ export function FullscreenPlayer({
   const progressPercent = duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0;
 
   return (
-    <div className="fixed inset-0 z-50 bg-gradient-to-b from-spotify-elevated via-spotify-dark to-black flex flex-col justify-between p-6 animate-slideUp select-none">
+    <div className="fixed inset-0 z-50 bg-gradient-to-b from-spotify-elevated via-spotify-dark to-black flex flex-col justify-between p-4 sm:p-6 pb-[calc(1rem+env(safe-area-inset-bottom))] animate-slideUp select-none overflow-y-auto">
       {/* Top Bar */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-shrink-0">
         <button
           onClick={onClose}
           className="p-2 text-spotify-subtext hover:text-white transition-colors"
@@ -64,8 +64,8 @@ export function FullscreenPlayer({
       </div>
 
       {/* Album Artwork with Ambient Shadow */}
-      <div className="flex-1 flex items-center justify-center my-4 py-2">
-        <div className="w-72 h-72 sm:w-80 sm:h-80 rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.8)] border border-white/10 relative">
+      <div className="flex-1 flex items-center justify-center my-4 py-2 min-h-0">
+        <div className="w-full max-w-[280px] sm:max-w-[320px] aspect-square rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.8)] border border-white/10 relative">
           {currentTrack.thumbnail ? (
             <img
               src={currentTrack.thumbnail}

@@ -182,9 +182,16 @@ async function importSpotifyPlaylist(rawUrl) {
     }
   }
 
-  // 3. Strict Check: NEVER return fake search results if tracks is 0
+  // 3. If tracks could not be directly scraped due to Spotify CORS restrictions, return metadata for AI smart import
   if (tracks.length === 0) {
-    throw new Error('לא הצלחנו לחלץ את השירים המקוריים מהפלייליסט. ודא שהפלייליסט ב-Spotify מוגדר כציבורי (Public) ושלא הועתק קישור מקוצר/פרטי.');
+    return {
+      requiresTrackList: true,
+      id: `pl_sp_${Date.now()}`,
+      title: title || 'פלייליסט ספוטיפיי',
+      cover: cover || '',
+      type: type === 'album' ? 'Album' : 'Playlist',
+      tracks: []
+    };
   }
 
   return {
@@ -204,18 +211,18 @@ async function importYouTubePlaylist(url) {
   if (playlistMatch) {
     const playlistId = playlistMatch[1];
     const invidiousHosts = [
+      'https://invidious.f5.si',
       'https://inv.nadeko.net',
       'https://invidious.nerdvpn.de',
-      'https://vid.puffyan.us',
-      'https://yt.artemislena.eu'
+      'https://vid.puffyan.us'
     ];
 
     for (const host of invidiousHosts) {
       try {
-        const res = await fetch(`${host}/api/v1/playlists/${playlistId}`);
+        const res = await fetch(`${host}/api/v1/playlists/${playlistId}`, { signal: AbortSignal.timeout(6000) });
         if (res.ok) {
           const data = await res.json();
-          const videos = data.videos || [];
+          const videos = (data.videos || []).filter(v => v.videoId);
           if (videos.length > 0) {
             return {
               id: `pl_yt_${Date.now()}`,
@@ -261,28 +268,78 @@ async function importYouTubePlaylist(url) {
 }
 
 /**
- * Import Playlist from plain text list of song names
+ * Smart AI & Text Playlist Importer
+ * Automatically parses song names, artists, Spotify track links, and numbers
+ * Resolves high-resolution 600x600 artwork, exact duration, and streamable tracks!
  */
 export async function importPlaylistFromTextList(title, textList, onProgress) {
-  const lines = textList
-    .split('\n')
-    .map(l => l.replace(/^\d+[\.\)\-:]\s*/, '').trim())
+  // Split by newlines or semicolons
+  const rawLines = textList
+    .split(/[\n;]+/)
+    .map(l => l.trim())
     .filter(l => l.length > 1);
 
-  if (lines.length === 0) {
-    throw new Error('נא להזין לפחות שם שיר אחד');
+  if (rawLines.length === 0) {
+    throw new Error('נא להזין לפחות שם שיר אחד או קישור');
+  }
+
+  // Clean lines: strip numbers, bullet points, timestamps like (3:45)
+  const cleanedQueries = [];
+  for (const raw of rawLines) {
+    // If it's a Spotify track URL, extract metadata via oEmbed
+    if (raw.includes('spotify.com/track/')) {
+      cleanedQueries.push({ isSpotifyTrackUrl: true, url: raw });
+      continue;
+    }
+
+    const cleaned = raw
+      .replace(/^[\d]+[\.\)\-:\s]+/, '') // strip leading "1. ", "02 - "
+      .replace(/[\(\[]\s*\d+:\d+\s*[\)\]]/g, '') // strip (3:45)
+      .replace(/\s+-\s+Single$/i, '')
+      .replace(/\s+-\s+EP$/i, '')
+      .trim();
+
+    if (cleaned.length > 1) {
+      cleanedQueries.push({ isSpotifyTrackUrl: false, query: cleaned });
+    }
+  }
+
+  if (cleanedQueries.length === 0) {
+    throw new Error('לא זוהו שירים תקינים בטקסט');
   }
 
   const foundTracks = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (onProgress) onProgress(i + 1, lines.length, line);
-    try {
-      const results = await searchTracks(line, 1);
-      if (results && results.length > 0) {
-        foundTracks.push(results[0]);
+  // Process in fast concurrent chunks of 3
+  const chunkSize = 3;
+  for (let i = 0; i < cleanedQueries.length; i += chunkSize) {
+    const chunk = cleanedQueries.slice(i, i + chunkSize);
+    const chunkResults = await Promise.all(
+      chunk.map(async (item, chunkIdx) => {
+        const globalIdx = i + chunkIdx;
+        try {
+          if (item.isSpotifyTrackUrl) {
+            if (onProgress) onProgress(globalIdx + 1, cleanedQueries.length, 'מחלץ שיר מספוטיפיי...');
+            const oembed = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(item.url)}`).then(r => r.json());
+            if (oembed && oembed.title) {
+              const query = `${oembed.title} ${oembed.author_name || ''}`;
+              const results = await searchTracks(query, 1);
+              if (results && results.length > 0) return results[0];
+            }
+          } else {
+            if (onProgress) onProgress(globalIdx + 1, cleanedQueries.length, item.query);
+            const results = await searchTracks(item.query, 1);
+            if (results && results.length > 0) return results[0];
+          }
+        } catch (e) {}
+        return null;
+      })
+    );
+
+    for (const res of chunkResults) {
+      if (res && !foundTracks.some(t => t.id === res.id)) {
+        foundTracks.push(res);
       }
-    } catch (e) {}
+    }
   }
 
   if (foundTracks.length === 0) {
@@ -291,7 +348,7 @@ export async function importPlaylistFromTextList(title, textList, onProgress) {
 
   return {
     id: `pl_custom_${Date.now()}`,
-    title: title.trim() || 'שירים שאני אוהב',
+    title: title.trim() || 'פלייליסט מיובא',
     cover: foundTracks[0]?.thumbnail || '',
     type: 'Custom Playlist',
     tracks: foundTracks

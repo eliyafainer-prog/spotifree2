@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
-import { X, DownloadCloud, Loader2, Music, Check, Sparkles, ListPlus, Link2 } from 'lucide-react';
-import { importPlaylistFromUrl } from '../services/spotifyImport';
-import { searchTracks } from '../services/directAudio';
+import { X, DownloadCloud, Loader2, Music, Check, Sparkles, ListPlus, Link2, ClipboardPaste, AlertCircle } from 'lucide-react';
+import { importPlaylistFromUrl, importPlaylistFromTextList } from '../services/spotifyImport';
 
 export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
-  const [tab, setTab] = useState('link'); // Default to URL Link import
+  const [tab, setTab] = useState('link'); // 'link' | 'ai'
   const [url, setUrl] = useState('');
   const [textList, setTextList] = useState('');
   const [playlistTitle, setPlaylistTitle] = useState('');
+  const [spotifyCover, setSpotifyCover] = useState('');
   const [loading, setLoading] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [preview, setPreview] = useState(null);
 
   if (!isOpen) return null;
@@ -21,58 +22,70 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
 
     setLoading(true);
     setError('');
+    setNotice('');
     setProgressMsg('מפענח קישור ומייבא שירים...');
     setPreview(null);
 
     try {
       const result = await importPlaylistFromUrl(url.trim());
+      
+      // If Spotify oEmbed succeeded but internal tracks require manual/text list due to Spotify CORS
+      if (result.requiresTrackList) {
+        setPlaylistTitle(result.title);
+        if (result.cover) setSpotifyCover(result.cover);
+        setTab('ai');
+        setNotice(`✨ זיהינו בהצלחה את הפלייליסט: "${result.title}"! בגלל אבטחת ספוטיפיי בדפדפן, הדבק כעת את שמות השירים וה-AI ימצא את העטיפות והשמע הרשמיים.`);
+        return;
+      }
+
       setPreview(result);
     } catch (err) {
-      setError(err.message || 'נכשל פיענוח הקישור. ודא שהפלייליסט תקין.');
+      setError(err.message || 'נכשל פיענוח הקישור. ודא שהפלייליסט ציבורי ותקין.');
     } finally {
       setLoading(false);
       setProgressMsg('');
     }
   };
 
-  const handleFetchTextList = async (e) => {
-    e?.preventDefault();
-    const lines = textList
-      .split('\n')
-      .map((l) => l.replace(/^\d+[\.\)\-:]\s*/, '').trim())
-      .filter((l) => l.length > 1);
+  const handlePasteFromClipboard = async () => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          setTextList(prev => prev ? `${prev}\n${text}` : text);
+        }
+      }
+    } catch (e) {
+      console.warn('Clipboard access not allowed:', e);
+    }
+  };
 
-    if (lines.length === 0) {
+  const handleFetchSmartList = async (e) => {
+    e?.preventDefault();
+    if (!textList.trim()) {
       setError('נא להזין או להדביק לפחות שם שיר אחד');
       return;
     }
 
     setLoading(true);
     setError('');
+    setNotice('');
     setPreview(null);
 
     try {
-      const foundTracks = [];
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        setProgressMsg(`מחפש שיר ${i + 1} מתוך ${lines.length}: "${line.substring(0, 25)}..."`);
-        const results = await searchTracks(line, 1);
-        if (results && results.length > 0) {
-          foundTracks.push(results[0]);
+      const result = await importPlaylistFromTextList(
+        playlistTitle.trim() || 'פלייליסט מיובא',
+        textList,
+        (current, total, currentName) => {
+          setProgressMsg(`מעבד שיר ${current} מתוך ${total}: "${currentName.substring(0, 28)}..."`);
         }
+      );
+
+      if (spotifyCover && !result.cover) {
+        result.cover = spotifyCover;
       }
 
-      if (foundTracks.length === 0) {
-        throw new Error('לא נמצאו שירים תואמים לשמות שהוזנו');
-      }
-
-      setPreview({
-        id: `pl_text_${Date.now()}`,
-        title: playlistTitle.trim() || 'פלייליסט חדש',
-        cover: foundTracks[0]?.thumbnail || '',
-        type: 'Custom Playlist',
-        tracks: foundTracks
-      });
+      setPreview(result);
     } catch (err) {
       setError(err.message || 'נכשל איתור השירים ברשימה');
     } finally {
@@ -86,10 +99,10 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
 
     const newPlaylist = {
       id: `pl_${Date.now()}`,
-      title: preview.title,
-      cover: preview.cover,
-      type: preview.type,
-      tracks: preview.tracks,
+      title: preview.title || 'פלייליסט חדש',
+      cover: preview.cover || '',
+      type: preview.type || 'Custom Playlist',
+      tracks: preview.tracks || [],
       createdAt: Date.now()
     };
 
@@ -97,6 +110,8 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
     onClose();
     setUrl('');
     setTextList('');
+    setPlaylistTitle('');
+    setSpotifyCover('');
     setPreview(null);
   };
 
@@ -109,10 +124,13 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-spotify-green/20 text-spotify-green flex items-center justify-center">
-              <DownloadCloud className="w-4 h-4" />
+            <div className="w-9 h-9 rounded-full bg-spotify-green/20 text-spotify-green flex items-center justify-center shadow">
+              <DownloadCloud className="w-5 h-5" />
             </div>
-            <h2 className="font-bold text-lg text-white">ייבוא פלייליסט</h2>
+            <div>
+              <h2 className="font-bold text-lg text-white">ייבוא פלייליסט חכם</h2>
+              <p className="text-[11px] text-spotify-subtext">ייבוא שירים עם שמות, עטיפות ואורכים מדויקים של ספוטיפיי</p>
+            </div>
           </div>
           <button
             onClick={onClose}
@@ -125,26 +143,34 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
         {/* Tab Switcher */}
         <div className="flex gap-2 p-1 bg-spotify-elevated rounded-lg border border-spotify-border">
           <button
-            onClick={() => { setTab('link'); setError(''); setPreview(null); }}
+            onClick={() => { setTab('link'); setError(''); setNotice(''); setPreview(null); }}
             className={`flex-1 py-2 px-3 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
               tab === 'link' ? 'bg-spotify-green text-black shadow-md' : 'text-spotify-subtext hover:text-white'
             }`}
           >
             <Link2 className="w-4 h-4" />
-            <span>הזנת קישור ספוטיפיי / יוטיוב</span>
+            <span>הזנת קישור (URL)</span>
           </button>
           <button
-            onClick={() => { setTab('text'); setError(''); setPreview(null); }}
+            onClick={() => { setTab('ai'); setError(''); setNotice(''); setPreview(null); }}
             className={`flex-1 py-2 px-3 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-              tab === 'text' ? 'bg-spotify-green text-black shadow-md' : 'text-spotify-subtext hover:text-white'
+              tab === 'ai' ? 'bg-spotify-green text-black shadow-md' : 'text-spotify-subtext hover:text-white'
             }`}
           >
-            <ListPlus className="w-4 h-4" />
-            <span>רשימת שירים ידנית</span>
+            <Sparkles className="w-4 h-4" />
+            <span>ייבוא חכם AI / טקסט</span>
           </button>
         </div>
 
-        {/* Tab 1 (Default): Link Import */}
+        {/* Notice Banner */}
+        {notice && (
+          <div className="p-3 bg-emerald-950/40 border border-emerald-500/40 rounded-lg text-xs text-emerald-300 flex items-start gap-2 animate-fadeIn">
+            <Sparkles className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+            <span>{notice}</span>
+          </div>
+        )}
+
+        {/* Tab 1: Link Import */}
         {tab === 'link' && (
           <form onSubmit={handleFetchLink} className="flex flex-col gap-3">
             <label className="text-xs font-semibold text-spotify-subtext">
@@ -175,9 +201,9 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
               </p>
             )}
 
-            <div className="text-[11px] text-spotify-subtext flex items-center gap-2 mt-1">
+            <div className="text-[11px] text-spotify-subtext flex flex-wrap items-center gap-2 mt-1">
               <Sparkles className="w-3.5 h-3.5 text-spotify-green" />
-              <span>דוגמה:</span>
+              <span>דוגמאות:</span>
               <button
                 type="button"
                 onClick={() => setUrl(sampleSpotifyUrl)}
@@ -185,13 +211,21 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
               >
                 Today's Top Hits (Spotify)
               </button>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={() => setUrl(sampleYouTubeUrl)}
+                className="text-spotify-green underline hover:text-spotify-green-hover"
+              >
+                Top Pop Playlist (YouTube)
+              </button>
             </div>
           </form>
         )}
 
-        {/* Tab 2: Manual Text List Import */}
-        {tab === 'text' && (
-          <form onSubmit={handleFetchTextList} className="flex flex-col gap-3">
+        {/* Tab 2: Smart AI / Text List Import */}
+        {tab === 'ai' && (
+          <form onSubmit={handleFetchSmartList} className="flex flex-col gap-3">
             <div>
               <label className="text-xs font-semibold text-spotify-subtext block mb-1">
                 שם הפלייליסט:
@@ -200,22 +234,35 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
                 type="text"
                 value={playlistTitle}
                 onChange={(e) => setPlaylistTitle(e.target.value)}
-                placeholder="תן שם לפלייליסט (למשל: הפלייליסט שלי)"
+                placeholder="למשל: הלהיטים שלי, Party 2026..."
                 className="w-full bg-spotify-elevated text-white text-sm px-3.5 py-2.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none"
               />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-spotify-subtext block mb-1">
-                הדבק כאן את שמות השירים (שיר אחד בכל שורה):
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-semibold text-spotify-subtext">
+                  הדבק שמות שירים (או קישורי שירים מספוטיפיי):
+                </label>
+                <button
+                  type="button"
+                  onClick={handlePasteFromClipboard}
+                  className="text-[11px] text-spotify-green hover:underline flex items-center gap-1"
+                >
+                  <ClipboardPaste className="w-3 h-3" />
+                  <span>הדבק מהלוח</span>
+                </button>
+              </div>
               <textarea
-                rows={6}
+                rows={5}
                 value={textList}
                 onChange={(e) => setTextList(e.target.value)}
-                placeholder={'שם שיר 1\nשם שיר 2\nשם שיר 3'}
+                placeholder={'עדן חסון - שקיעות אדומות\nחנן בן ארי - הלוואי\nColdplay - Viva La Vida\nאו העתק רשימה ישירות מספוטיפיי'}
                 className="w-full bg-spotify-elevated text-white text-sm p-3.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none font-sans"
               />
+              <p className="text-[10px] text-spotify-subtext/80 mt-1">
+                💡 המנגנון מנקה אוטומטית מספור (1., 2.), מזהה אמנים, ומצמיד עטיפות HD ואורכי שירים רשמיים.
+              </p>
             </div>
 
             <button
@@ -226,10 +273,10 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
               {loading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>{progressMsg || 'מאתר ומייבא שירים...'}</span>
+                  <span className="text-xs truncate max-w-xs">{progressMsg || 'מאתר ומייבא שירים ב-AI...'}</span>
                 </>
               ) : (
-                'חפש וצור פלייליסט'
+                'חפש וצור פלייליסט עם עטיפות רשמיות'
               )}
             </button>
           </form>
@@ -237,26 +284,27 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
 
         {/* Error message */}
         {error && (
-          <div className="p-3 bg-red-900/30 border border-red-500/40 rounded-lg text-xs text-red-300">
-            {error}
+          <div className="p-3 bg-red-900/30 border border-red-500/40 rounded-lg text-xs text-red-300 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            <span>{error}</span>
           </div>
         )}
 
         {/* Preview of loaded playlist */}
         {preview && (
-          <div className="p-4 bg-spotify-elevated rounded-lg border border-spotify-border flex flex-col gap-3">
+          <div className="p-4 bg-spotify-elevated rounded-lg border border-spotify-border flex flex-col gap-3 animate-fadeIn">
             <div className="flex items-center gap-3">
               {preview.cover ? (
-                <img src={preview.cover} alt="" className="w-14 h-14 rounded-md object-cover shadow-md" />
+                <img src={preview.cover} alt="" className="w-14 h-14 rounded-md object-cover shadow-md flex-shrink-0" />
               ) : (
-                <div className="w-14 h-14 rounded-md bg-spotify-highlight flex items-center justify-center text-spotify-subtext">
+                <div className="w-14 h-14 rounded-md bg-spotify-highlight flex items-center justify-center text-spotify-subtext flex-shrink-0">
                   <Music className="w-6 h-6" />
                 </div>
               )}
               <div className="flex-1 min-w-0">
                 <h3 className="font-bold text-white text-base truncate">{preview.title}</h3>
                 <p className="text-xs text-spotify-green font-medium">
-                  זוהו {preview.tracks?.length || 0} שירים ({preview.type})
+                  זוהו {preview.tracks?.length || 0} שירים עם מטא-דאטה ועטיפות מלאות!
                 </p>
               </div>
             </div>
@@ -274,4 +322,3 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
     </div>
   );
 }
-
