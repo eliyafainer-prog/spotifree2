@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { ForegroundService } from '@capawesome-team/capacitor-android-foreground-service';
-import { getPlayableAudioUrl } from '../services/directAudio';
+import { resolveYouTubeVideo } from '../services/directAudio';
 import { addRecentTrack } from '../services/storage';
 import { getOfflineTrack } from '../services/offlineStorage';
 import { recordTrackPlay, recordListeningSeconds } from '../services/analytics';
@@ -51,6 +51,9 @@ function generateShuffledDeck(length, startingIndex = -1) {
 
 export function useAudioPlayer() {
   const audioRef = useRef(null);
+  const ytPlayerRef = useRef(null);
+  const isYtReadyRef = useRef(false);
+  const activeEngineRef = useRef('youtube'); // 'youtube' | 'audio'
   const wakeLockRef = useRef(null);
 
   const [currentTrack, setCurrentTrack] = useState(null);
@@ -81,6 +84,8 @@ export function useAudioPlayer() {
   const shuffledIndicesRef = useRef([]);
   const shufflePosRef = useRef(0);
   const userPausedRef = useRef(false);
+  const isMutedRef = useRef(false);
+  const volumeRef = useRef(0.8);
   const abortControllerRef = useRef(null);
 
   useEffect(() => { queueRef.current = queue; }, [queue]);
@@ -88,6 +93,8 @@ export function useAudioPlayer() {
   useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
   useEffect(() => { shuffleModeRef.current = shuffleMode; }, [shuffleMode]);
   useEffect(() => { repeatModeRef.current = repeatMode; }, [repeatMode]);
+  useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
+  useEffect(() => { volumeRef.current = volume; }, [volume]);
 
   // Request screen wake lock during playback if supported
   const requestWakeLock = async () => {
@@ -105,11 +112,27 @@ export function useAudioPlayer() {
     }
   };
 
-  // Initialize Permanent HTML5 Audio Element for Background Playback
-  useEffect(() => {
-    let errorCount = 0;
-    let lastErrorTrackId = null;
+  // Helper to send command to YouTube embed (via YT API or postMessage fallback)
+  const sendYtCommand = useCallback((func, args = []) => {
+    if (ytPlayerRef.current && typeof ytPlayerRef.current[func] === 'function') {
+      try {
+        ytPlayerRef.current[func](...args);
+        return;
+      } catch (e) {}
+    }
+    const iframe = document.getElementById('spotifree-yt-iframe');
+    if (iframe?.contentWindow) {
+      iframe.contentWindow.postMessage(JSON.stringify({
+        event: 'command',
+        func,
+        args
+      }), '*');
+    }
+  }, []);
 
+  // Initialize Elements & Listeners
+  useEffect(() => {
+    // 1. Setup HTML5 Audio element (for offline blobs & mobile background keepalive)
     let audio = document.getElementById('spotifree-audio-engine');
     if (!audio) {
       audio = document.createElement('audio');
@@ -124,7 +147,8 @@ export function useAudioPlayer() {
     audio.volume = isMuted ? 0 : volume;
     audioRef.current = audio;
 
-    const onTimeUpdate = () => {
+    const onAudioTimeUpdate = () => {
+      if (activeEngineRef.current !== 'audio') return;
       setCurrentTime(audio.currentTime);
       if (audio.duration && !isNaN(audio.duration)) {
         setDuration(audio.duration);
@@ -132,71 +156,139 @@ export function useAudioPlayer() {
       recordListeningSeconds(0.25);
     };
 
-    const onDurationChange = () => {
-      if (audio.duration && !isNaN(audio.duration)) {
-        setDuration(audio.duration);
-      }
-    };
-
-    const onPlaying = () => {
-      errorCount = 0;
-      setIsPlaying(true);
-      setIsLoading(false);
-      requestWakeLock();
-      if (currentTrackRef.current) {
-        startNativeForeground(currentTrackRef.current);
-      }
-    };
-
-    const onPause = () => {
-      setIsPlaying(false);
-      releaseWakeLock();
-      stopNativeForeground();
-    };
-
-    const onWaiting = () => {
-      setIsLoading(true);
-    };
-
-    const onEnded = () => {
-      // Guard against false triggers from silent data URI or premature termination (< 2 seconds)
-      if (!audio.src || audio.src.startsWith('data:') || audio.src === SILENT_AUDIO_URI || audio.currentTime < 2) {
-        return;
-      }
+    const onAudioEnded = () => {
+      if (activeEngineRef.current !== 'audio') return;
+      if (!audio.src || audio.src.startsWith('data:') || audio.currentTime < 2) return;
       handleNextTrack();
     };
 
-    const onError = (e) => {
-      // Ignore errors on data: URI or if audio source is empty
-      if (!audio.src || audio.src.startsWith('data:')) {
-        return;
-      }
+    audio.addEventListener('timeupdate', onAudioTimeUpdate);
+    audio.addEventListener('ended', onAudioEnded);
 
-      console.warn('Audio playback error:', e);
-      setIsLoading(false);
-      setIsPlaying(false);
-      releaseWakeLock();
-      stopNativeForeground();
+    // 2. Setup YouTube IFrame Player Element in DOM if not present
+    let iframe = document.getElementById('spotifree-yt-iframe');
+    if (!iframe) {
+      let keeper = document.getElementById('spotifree-yt-keeper');
+      if (!keeper) {
+        keeper = document.createElement('div');
+        keeper.id = 'spotifree-yt-keeper';
+        keeper.style.cssText = 'position:fixed!important;bottom:-9999px!important;right:-9999px!important;width:200px!important;height:200px!important;opacity:0.001!important;pointer-events:none!important;z-index:-9999!important;overflow:hidden!important;';
+        document.body.appendChild(keeper);
+      }
+      iframe = document.createElement('iframe');
+      iframe.id = 'spotifree-yt-iframe';
+      iframe.style.cssText = 'width:200px!important;height:200px!important;border:none!important;';
+      iframe.allow = 'autoplay; encrypted-media';
+      iframe.title = 'SpotiFree Audio Engine';
+      keeper.appendChild(iframe);
+    }
+
+    // 3. PostMessage listener for YouTube IFrame state & time updates
+    const onWindowMessage = (evt) => {
+      if (activeEngineRef.current !== 'youtube') return;
+      try {
+        const data = typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
+        if (!data) return;
+
+        // State changes: 1 = PLAYING, 2 = PAUSED, 0 = ENDED, 3 = BUFFERING
+        if (data.event === 'onStateChange') {
+          if (data.info === 1) {
+            setIsPlaying(true);
+            setIsLoading(false);
+            requestWakeLock();
+            if (currentTrackRef.current) startNativeForeground(currentTrackRef.current);
+          } else if (data.info === 2) {
+            setIsPlaying(false);
+            releaseWakeLock();
+            stopNativeForeground();
+          } else if (data.info === 3) {
+            setIsLoading(true);
+          } else if (data.info === 0) {
+            handleNextTrack();
+          }
+        }
+
+        // Time updates
+        if (data.info && typeof data.info.currentTime === 'number') {
+          setCurrentTime(data.info.currentTime);
+          recordListeningSeconds(0.25);
+        }
+        if (data.info && typeof data.info.duration === 'number' && data.info.duration > 0) {
+          setDuration(data.info.duration);
+        }
+      } catch (e) {}
     };
 
-    audio.addEventListener('timeupdate', onTimeUpdate);
-    audio.addEventListener('durationchange', onDurationChange);
-    audio.addEventListener('playing', onPlaying);
-    audio.addEventListener('pause', onPause);
-    audio.addEventListener('waiting', onWaiting);
-    audio.addEventListener('ended', onEnded);
-    audio.addEventListener('error', onError);
+    window.addEventListener('message', onWindowMessage);
+
+    // 4. Bind window.YT.Player if library is loaded
+    const bindYt = () => {
+      if (window.YT && window.YT.Player && !ytPlayerRef.current) {
+        try {
+          ytPlayerRef.current = new window.YT.Player('spotifree-yt-iframe', {
+            events: {
+              onReady: (e) => {
+                isYtReadyRef.current = true;
+                e.target.setVolume(Math.round((isMutedRef.current ? 0 : volumeRef.current) * 100));
+              },
+              onStateChange: (e) => {
+                if (activeEngineRef.current !== 'youtube') return;
+                if (e.data === 1) {
+                  setIsPlaying(true);
+                  setIsLoading(false);
+                  const dur = ytPlayerRef.current?.getDuration?.();
+                  if (dur && !isNaN(dur) && dur > 0) setDuration(dur);
+                } else if (e.data === 2) {
+                  setIsPlaying(false);
+                } else if (e.data === 0) {
+                  handleNextTrack();
+                }
+              }
+            }
+          });
+        } catch (err) {}
+      }
+    };
+
+    if (window.YT && window.YT.Player) {
+      bindYt();
+    } else {
+      const prevCallback = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => {
+        if (prevCallback) prevCallback();
+        bindYt();
+      };
+    }
 
     return () => {
-      audio.removeEventListener('timeupdate', onTimeUpdate);
-      audio.removeEventListener('durationchange', onDurationChange);
-      audio.removeEventListener('playing', onPlaying);
-      audio.removeEventListener('pause', onPause);
-      audio.removeEventListener('waiting', onWaiting);
-      audio.removeEventListener('ended', onEnded);
-      audio.removeEventListener('error', onError);
+      audio.removeEventListener('timeupdate', onAudioTimeUpdate);
+      audio.removeEventListener('ended', onAudioEnded);
+      window.removeEventListener('message', onWindowMessage);
     };
   }, []);
+
+  // Time tracking interval for YouTube Player
+  useEffect(() => {
+    let timer = null;
+    if (isPlaying && activeEngineRef.current === 'youtube') {
+      timer = setInterval(() => {
+        if (ytPlayerRef.current?.getCurrentTime) {
+          const t = ytPlayerRef.current.getCurrentTime();
+          if (typeof t === 'number' && !isNaN(t)) {
+            setCurrentTime(t);
+            recordListeningSeconds(0.25);
+          }
+          const dur = ytPlayerRef.current.getDuration?.();
+          if (dur && !isNaN(dur) && dur > 0) {
+            setDuration(dur);
+          }
+        }
+      }, 250);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isPlaying]);
 
   // Update volume
   const setVolume = useCallback((val) => {
@@ -207,7 +299,12 @@ export function useAudioPlayer() {
     if (audioRef.current) {
       audioRef.current.volume = clamped;
     }
-  }, []);
+    if (ytPlayerRef.current?.setVolume) {
+      ytPlayerRef.current.setVolume(Math.round(clamped * 100));
+    } else {
+      sendYtCommand('setVolume', [Math.round(clamped * 100)]);
+    }
+  }, [sendYtCommand]);
 
   const toggleMute = useCallback(() => {
     setIsMuted(prev => {
@@ -215,11 +312,40 @@ export function useAudioPlayer() {
       if (audioRef.current) {
         audioRef.current.volume = next ? 0 : volume;
       }
+      if (ytPlayerRef.current?.setVolume) {
+        ytPlayerRef.current.setVolume(next ? 0 : Math.round(volume * 100));
+      } else {
+        sendYtCommand('setVolume', [next ? 0 : Math.round(volume * 100)]);
+      }
       return next;
     });
-  }, [volume]);
+  }, [volume, sendYtCommand]);
 
-  // Main playback handler
+  // Setup MediaSession for lockscreen / mobile background controls
+  const updateMediaSession = useCallback((track) => {
+    if ('mediaSession' in navigator && track) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: track.title || 'SpotiFree',
+          artist: track.artist || 'SpotiFree Music',
+          album: track.album || 'SpotiFree',
+          artwork: track.thumbnail ? [
+            { src: track.thumbnail, sizes: '512x512', type: 'image/jpeg' }
+          ] : []
+        });
+
+        navigator.mediaSession.setActionHandler('play', () => togglePlay());
+        navigator.mediaSession.setActionHandler('pause', () => togglePlay());
+        navigator.mediaSession.setActionHandler('nexttrack', () => handleNextTrack());
+        navigator.mediaSession.setActionHandler('previoustrack', () => handlePrevTrack());
+        navigator.mediaSession.setActionHandler('seekto', (details) => {
+          if (typeof details.seekTime === 'number') seek(details.seekTime);
+        });
+      } catch (e) {}
+    }
+  }, []);
+
+  // Main Full-Song Playback Handler
   const playTrack = useCallback(async (track, newQueue = null, indexInQueue = -1) => {
     if (!track) return;
     userPausedRef.current = false;
@@ -228,7 +354,6 @@ export function useAudioPlayer() {
       abortControllerRef.current.abort();
     }
     abortControllerRef.current = new AbortController();
-    const signal = abortControllerRef.current.signal;
 
     if (newQueue) {
       setQueue(newQueue);
@@ -256,78 +381,140 @@ export function useAudioPlayer() {
     // Save to history & analytics
     addRecentTrack(track);
     recordTrackPlay(track);
+    updateMediaSession(track);
 
     try {
-      // Hold the media session / audio lock on mobile by playing silence while fetching
-      if (audioRef.current) {
-        audioRef.current.src = SILENT_AUDIO_URI;
-        audioRef.current.loop = true;
-        await audioRef.current.play().catch(() => {});
-      }
-
-      // 1. Check if downloaded offline
+      // 1. Check if saved offline locally (Blob audio)
       const offline = await getOfflineTrack(track);
-      let streamUrl = '';
-
       if (offline && offline.audioBlob) {
-        streamUrl = URL.createObjectURL(offline.audioBlob);
-      } else {
-        // 2. Fetch direct ad-free audio stream
-        streamUrl = await getPlayableAudioUrl(track, signal);
+        activeEngineRef.current = 'audio';
+        sendYtCommand('pauseVideo');
+
+        const blobUrl = URL.createObjectURL(offline.audioBlob);
+        if (audioRef.current && !userPausedRef.current) {
+          audioRef.current.loop = false;
+          audioRef.current.src = blobUrl;
+          audioRef.current.currentTime = 0;
+          await audioRef.current.play();
+          setIsPlaying(true);
+          setIsLoading(false);
+        }
+        return;
       }
 
-      if (currentTrackRef.current?.id !== track.id) return;
+      // 2. Online Full-Track Playback via YouTube Engine (FULL 3-5 MINUTE SONG, ZERO 30s CAPPINGS!)
+      activeEngineRef.current = 'youtube';
+      try { audioRef.current?.pause?.(); } catch (e) {}
 
-      if (audioRef.current && streamUrl) {
-        audioRef.current.pause();
-        audioRef.current.loop = false;
-        audioRef.current.src = streamUrl;
-        audioRef.current.currentTime = 0;
+      let videoId = track.videoId;
+      if (!videoId && track.id?.startsWith('yt_')) {
+        videoId = track.id.replace('yt_', '');
+      }
 
-        // Keep React state in sync with enriched artwork & duration
-        setCurrentTrack({ ...track });
-        if (track.durationSeconds) {
-          setDuration(track.durationSeconds);
-        }
-
-        if (!userPausedRef.current) {
-          try {
-            await audioRef.current.play();
-            setIsPlaying(true);
-          } catch (playErr) {
-            console.warn('Play attempt failed:', playErr);
+      // If videoId is not attached yet (e.g. Spotify imported track or iTunes search result), resolve full clean audio
+      if (!videoId) {
+        const resolved = await resolveYouTubeVideo(track.title, track.artist);
+        if (resolved && resolved.videoId) {
+          videoId = resolved.videoId;
+          track.videoId = videoId;
+          if (resolved.durationSeconds) {
+            track.durationSeconds = resolved.durationSeconds;
+            setDuration(resolved.durationSeconds);
           }
+          if (resolved.thumbnail && (!track.thumbnail || track.thumbnail.includes('placeholder'))) {
+            track.thumbnail = resolved.thumbnail;
+          }
+          setCurrentTrack({ ...track });
         }
+      }
+
+      const iframe = document.getElementById('spotifree-yt-iframe');
+
+      if (videoId) {
+        track.videoId = videoId;
+
+        // Keep mobile audio lock alive in parallel so phone screen lock never interrupts audio
+        if (audioRef.current && (Capacitor.isNativePlatform() || /mobile|android|iphone|ipad/i.test(navigator.userAgent))) {
+          audioRef.current.src = SILENT_AUDIO_URI;
+          audioRef.current.loop = true;
+          audioRef.current.play().catch(() => {});
+        }
+
+        // If YT API player is ready and instantiated, use loadVideoById for instant switch
+        if (isYtReadyRef.current && ytPlayerRef.current?.loadVideoById) {
+          try {
+            ytPlayerRef.current.loadVideoById(videoId);
+            ytPlayerRef.current.playVideo();
+            setIsPlaying(true);
+            setIsLoading(false);
+            return;
+          } catch (e) {}
+        }
+
+        // Direct iframe load: Starts playing immediately with controls=0 and autoplay=1
+        if (iframe) {
+          iframe.src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&enablejsapi=1&playsinline=1&controls=0&origin=${encodeURIComponent(window.location.origin)}`;
+          setIsPlaying(true);
+          setIsLoading(false);
+        }
+        return;
+      }
+
+      // 3. Fallback: Search embed directly inside YouTube player (NO 30s previews EVER!)
+      if (iframe) {
+        const searchQuery = `${track.title} ${track.artist || ''}`.trim();
+        iframe.src = `https://www.youtube-nocookie.com/embed?listType=search&list=${encodeURIComponent(searchQuery)}&autoplay=1&enablejsapi=1&playsinline=1&controls=0&origin=${encodeURIComponent(window.location.origin)}`;
+        setIsPlaying(true);
         setIsLoading(false);
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
-        console.warn('Playback error:', err);
-        setIsLoading(false);
-      }
+      console.warn('Playback error:', err);
+      setIsLoading(false);
     }
-  }, []);
+  }, [sendYtCommand, updateMediaSession]);
 
   const togglePlay = useCallback(() => {
-    if (!audioRef.current || !currentTrack) return;
+    if (!currentTrack) return;
 
     if (isPlaying) {
       userPausedRef.current = true;
-      audioRef.current.pause();
+      if (activeEngineRef.current === 'youtube') {
+        if (ytPlayerRef.current?.pauseVideo) {
+          ytPlayerRef.current.pauseVideo();
+        } else {
+          sendYtCommand('pauseVideo');
+        }
+      } else {
+        audioRef.current?.pause?.();
+      }
       setIsPlaying(false);
     } else {
       userPausedRef.current = false;
-      audioRef.current.play().catch(console.warn);
+      if (activeEngineRef.current === 'youtube') {
+        if (ytPlayerRef.current?.playVideo) {
+          ytPlayerRef.current.playVideo();
+        } else {
+          sendYtCommand('playVideo');
+        }
+      } else {
+        audioRef.current?.play?.().catch(console.warn);
+      }
       setIsPlaying(true);
     }
-  }, [isPlaying, currentTrack]);
+  }, [isPlaying, currentTrack, sendYtCommand]);
 
   const seek = useCallback((time) => {
-    if (audioRef.current) {
+    if (activeEngineRef.current === 'youtube') {
+      if (ytPlayerRef.current?.seekTo) {
+        ytPlayerRef.current.seekTo(time, true);
+      } else {
+        sendYtCommand('seekTo', [time, true]);
+      }
+    } else if (audioRef.current) {
       audioRef.current.currentTime = time;
-      setCurrentTime(time);
     }
-  }, []);
+    setCurrentTime(time);
+  }, [sendYtCommand]);
 
   // Advance to Next Track
   const handleNextTrack = useCallback(async () => {
@@ -338,7 +525,15 @@ export function useAudioPlayer() {
 
     if (repMode === 'one' && currentTrackRef.current) {
       seek(0);
-      audioRef.current?.play().catch(() => {});
+      if (activeEngineRef.current === 'youtube') {
+        if (ytPlayerRef.current?.playVideo) {
+          ytPlayerRef.current.playVideo();
+        } else {
+          sendYtCommand('playVideo');
+        }
+      } else {
+        audioRef.current?.play?.().catch(() => {});
+      }
       return;
     }
 
@@ -374,7 +569,7 @@ export function useAudioPlayer() {
     if (nextIdx >= 0 && nextIdx < q.length) {
       playTrack(q[nextIdx], null, nextIdx);
     }
-  }, [playTrack, seek]);
+  }, [playTrack, seek, sendYtCommand]);
 
   // Previous Track
   const handlePrevTrack = useCallback(() => {

@@ -107,7 +107,6 @@ export async function enrichTracksWithItunes(rawTracks, onProgress) {
                 album: match.collectionName || '',
                 thumbnail: thumb || t.thumbnail,
                 durationSeconds,
-                previewUrl: match.previewUrl || '',
                 source: 'spotify',
                 rawTrack: match
               };
@@ -123,7 +122,6 @@ export async function enrichTracksWithItunes(rawTracks, onProgress) {
           artist: t.artist,
           thumbnail: t.thumbnail || '',
           durationSeconds: t.durationSeconds || 210,
-          previewUrl: '',
           source: 'spotify'
         };
       })

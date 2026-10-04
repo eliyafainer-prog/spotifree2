@@ -18,9 +18,13 @@
         padding: 0;
       }
     </style>
+    <script src="https://www.youtube.com/iframe_api"></script>
   </head>
   <body class="bg-spotify-base text-white antialiased overflow-hidden select-none">
     <div id="root"></div>
+    <div id="spotifree-yt-keeper" style="position:fixed!important;bottom:-9999px!important;right:-9999px!important;width:200px!important;height:200px!important;opacity:0.001!important;pointer-events:none!important;z-index:-9999!important;overflow:hidden!important;">
+      <iframe id="spotifree-yt-iframe" style="width:200px!important;height:200px!important;border:none!important;" allow="autoplay; encrypted-media"></iframe>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
