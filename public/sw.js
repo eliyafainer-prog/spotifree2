@@ -1,8 +1,6 @@
-// SpotiFree PWA Service Worker for Mobile Caching & Background Audio
-const CACHE_NAME = 'spotifree-v2-cache-v2';
+// SpotiFree PWA Service Worker (V4 - Network-First, Zero-Ad Native Audio)
+const CACHE_NAME = 'spotifree-v4-clean-engine';
 const ASSETS_TO_CACHE = [
-  './',
-  './index.html',
   './manifest.webmanifest',
   './icons/music-icon.svg'
 ];
@@ -28,12 +26,48 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  if (event.request.url.includes('sndcdn.com') || event.request.url.includes('audius.co')) {
+  const url = event.request.url;
+
+  // Never cache audio streaming chunks or third-party APIs
+  if (
+    url.includes('googlevideo.com') ||
+    url.includes('sndcdn.com') ||
+    url.includes('audius.co') ||
+    url.includes('invidious') ||
+    url.includes('itunes.apple.com') ||
+    url.includes('/api/')
+  ) {
     return;
   }
+
+  // Network-first strategy for HTML pages to guarantee users get immediate app updates
+  if (event.request.mode === 'navigate' || event.request.destination === 'document' || url.endsWith('.html') || url.endsWith('/')) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
+  // Stale-while-revalidate for static assets
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
-      return cachedResponse || fetch(event.request);
+      const fetchPromise = fetch(event.request).then((networkResponse) => {
+        if (networkResponse && networkResponse.status === 200) {
+          const clone = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        }
+        return networkResponse;
+      }).catch(() => cachedResponse);
+
+      return cachedResponse || fetchPromise;
     })
   );
 });
