@@ -1,5 +1,5 @@
-// SpotiFree PWA Service Worker (V4 - Network-First, Zero-Ad Native Audio)
-const CACHE_NAME = 'spotifree-v4-clean-engine';
+// SpotiFree PWA Service Worker (V5 - Network-First, Zero-Ad Native Audio)
+const CACHE_NAME = 'spotifree-v5-direct-native-engine';
 const ASSETS_TO_CACHE = [
   './manifest.webmanifest',
   './icons/music-icon.svg'

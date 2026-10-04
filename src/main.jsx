@@ -5,13 +5,13 @@ import './index.css';
 
 // Purge any legacy cached video IDs from previous builds to eliminate cached monetized clips
 try {
-  if (localStorage.getItem('spotifree_app_version') !== '4.0.0') {
+  if (localStorage.getItem('spotifree_app_version') !== '5.0.0') {
     Object.keys(localStorage).forEach(key => {
       if (key.startsWith('spotifree_yt_') || key.startsWith('spotifree_stream_')) {
         localStorage.removeItem(key);
       }
     });
-    localStorage.setItem('spotifree_app_version', '4.0.0');
+    localStorage.setItem('spotifree_app_version', '5.0.0');
   }
 } catch (e) {}
 

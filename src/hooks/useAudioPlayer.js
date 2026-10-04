@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import Hls from 'hls.js';
 import { Capacitor } from '@capacitor/core';
 import { ForegroundService } from '@capawesome-team/capacitor-android-foreground-service';
 import { resolveDirectAudioStream } from '../services/directAudio';
@@ -48,6 +49,7 @@ function generateShuffledDeck(length, startingIndex = -1) {
 
 export function useAudioPlayer() {
   const audioRef = useRef(null);
+  const hlsRef = useRef(null);
   const wakeLockRef = useRef(null);
 
   const [currentTrack, setCurrentTrack] = useState(null);
@@ -198,13 +200,27 @@ export function useAudioPlayer() {
     const onAudioError = async (e) => {
       console.warn('HTML5 Audio error:', e);
       const track = currentTrackRef.current;
-      if (track && retryCountRef.current < 1 && !userPausedRef.current) {
+      if (track && retryCountRef.current < 2 && !userPausedRef.current) {
         retryCountRef.current += 1;
         try {
           const fresh = await resolveDirectAudioStream(track, true);
           if (fresh?.streamUrl) {
-            audio.src = fresh.streamUrl;
-            await audio.play();
+            if (hlsRef.current) {
+              hlsRef.current.destroy();
+              hlsRef.current = null;
+            }
+            if (fresh.isHls && !audio.canPlayType('application/vnd.apple.mpegurl') && Hls.isSupported()) {
+              const hls = new Hls({ enableWorker: true });
+              hlsRef.current = hls;
+              hls.loadSource(fresh.streamUrl);
+              hls.attachMedia(audio);
+              hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                if (!userPausedRef.current) audio.play().catch(console.warn);
+              });
+            } else {
+              audio.src = fresh.streamUrl;
+              await audio.play();
+            }
             return;
           }
         } catch (err) {}
@@ -223,6 +239,10 @@ export function useAudioPlayer() {
     audio.addEventListener('error', onAudioError);
 
     return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
       audio.removeEventListener('timeupdate', onAudioTimeUpdate);
       audio.removeEventListener('durationchange', onAudioDurationChange);
       audio.removeEventListener('playing', onAudioPlaying);
@@ -359,12 +379,39 @@ export function useAudioPlayer() {
       updateMediaSession(track);
 
       if (!userPausedRef.current) {
-        audio.src = resolved.streamUrl;
-        audio.currentTime = 0;
-        await audio.play();
-        setIsPlaying(true);
-        setIsLoading(false);
-        prefetchNextTrack(targetQueue, targetIndex, shuffleModeRef.current);
+        if (hlsRef.current) {
+          hlsRef.current.destroy();
+          hlsRef.current = null;
+        }
+
+        if (resolved.isHls && !audio.canPlayType('application/vnd.apple.mpegurl') && Hls.isSupported()) {
+          const hls = new Hls({ enableWorker: true });
+          hlsRef.current = hls;
+          hls.loadSource(resolved.streamUrl);
+          hls.attachMedia(audio);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            if (!userPausedRef.current) {
+              audio.play().catch(console.warn);
+              setIsPlaying(true);
+              setIsLoading(false);
+              prefetchNextTrack(targetQueue, targetIndex, shuffleModeRef.current);
+            }
+          });
+          hls.on(Hls.Events.ERROR, (event, data) => {
+            if (data.fatal) {
+              console.warn('HLS Fatal Error:', data.type);
+              setIsLoading(false);
+              setIsPlaying(false);
+            }
+          });
+        } else {
+          audio.src = resolved.streamUrl;
+          audio.currentTime = 0;
+          await audio.play();
+          setIsPlaying(true);
+          setIsLoading(false);
+          prefetchNextTrack(targetQueue, targetIndex, shuffleModeRef.current);
+        }
       }
     } catch (err) {
       console.warn('Playback error:', err);

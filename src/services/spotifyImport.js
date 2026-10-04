@@ -1,5 +1,5 @@
 // AI-Powered Spotify & YouTube Playlist Importer for SpotiFree V2
-// 100% Client-Side, Zero Login Required, Automatic Track Extraction via AI Reader & iTunes HD Enrichment
+// 100% Client-Side, Zero Login Required, Automatic Track Extraction via Embed JSON-LD, AI Reader & iTunes HD Enrichment
 
 import { searchTracks } from './directAudio.js';
 
@@ -59,7 +59,6 @@ function extractSpotifyEntity(input) {
 /**
  * Enriches tracks concurrently with official iTunes metadata:
  * - High-resolution 600x600 HD artwork for every single track
- * - Pristine 256kbps audio previewUrl (Apple CDN, open CORS, works 100% on cellular and mobile)
  * - Exact official song duration
  * - Official album and artist title
  */
@@ -86,14 +85,29 @@ export async function enrichTracksWithItunes(rawTracks, onProgress) {
             .split('&')[0]
             .trim();
 
+          const isHebrew = /[\u0590-\u05FF]/.test(cleanTitle + ' ' + cleanArtist);
+          const countryParam = isHebrew ? '&country=IL' : '';
+
           const query = encodeURIComponent(`${cleanTitle} ${cleanArtist}`.trim() || t.title);
-          const res = await fetch(`https://itunes.apple.com/search?term=${query}&media=music&entity=song&limit=1`, {
+          const res = await fetch(`https://itunes.apple.com/search?term=${query}${countryParam}&media=music&entity=song&limit=1`, {
             signal: AbortSignal.timeout(3500)
           });
 
           if (res.ok) {
             const data = await res.json();
-            const match = data.results?.[0];
+            let match = data.results?.[0];
+
+            // If Hebrew with country=IL returned empty, try universal fallback
+            if (!match && isHebrew) {
+              const fbRes = await fetch(`https://itunes.apple.com/search?term=${query}&media=music&entity=song&limit=1`, {
+                signal: AbortSignal.timeout(2500)
+              });
+              if (fbRes.ok) {
+                const fbData = await fbRes.json();
+                match = fbData.results?.[0];
+              }
+            }
+
             if (match) {
               let thumb = match.artworkUrl100 || '';
               if (thumb.includes('100x100bb.jpg')) {
@@ -134,7 +148,7 @@ export async function enrichTracksWithItunes(rawTracks, onProgress) {
 }
 
 /**
- * Import Spotify Playlist, Album or Track automatically using AI Reader & HD Enrichment
+ * Import Spotify Playlist, Album or Track automatically using NextData Embed, AI Reader & HD Enrichment
  */
 async function importSpotifyPlaylist(rawUrl, onProgress) {
   const entity = extractSpotifyEntity(rawUrl);
@@ -150,7 +164,7 @@ async function importSpotifyPlaylist(rawUrl, onProgress) {
   let title = type === 'album' ? 'אלבום מיובא' : 'פלייליסט ספוטיפיי';
   let cover = '';
 
-  // 1. Fetch official Spotify Title and HD Cover Art via oEmbed (always works with open CORS)
+  // 1. Fetch official Spotify Title and HD Cover Art via oEmbed (open CORS)
   try {
     const oembedRes = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(canonicalUrl)}`, {
       signal: AbortSignal.timeout(6000)
@@ -166,46 +180,94 @@ async function importSpotifyPlaylist(rawUrl, onProgress) {
 
   const rawTracks = [];
 
-  // 2. PRIMARY STRATEGY: Jina AI Web Reader (Extracts all songs, artists, and durations automatically)
+  // 2. STRATEGY A: Direct Spotify Embed __NEXT_DATA__ Scraping (100% accurate, all track titles + artists + durations)
   try {
-    if (onProgress) onProgress(0, 0, 'מפענח את הפלייליסט באמצעות AI Reader...');
-    const jinaUrl = `https://r.jina.ai/${embedUrl}`;
-    const jinaRes = await fetch(jinaUrl, {
-      signal: AbortSignal.timeout(15000)
-    });
+    if (onProgress) onProgress(0, 0, 'מפענח את הפלייליסט ישירות מספוטיפיי...');
+    const proxyUrls = [
+      `https://api.allorigins.win/get?url=${encodeURIComponent(embedUrl)}`,
+      embedUrl
+    ];
 
-    if (jinaRes.ok) {
-      const text = await jinaRes.text();
-      // Match blocks like:
-      // 1.   ### Patient Zero
-      // #### Taylor Swift
-      // 03:45
-      const blockRegex = /(?:^|\n)(?:\d+[\.\)]\s+)?###\s+([^\n]+)\n+####\s+(?:E\s+)?([^\n]+)(?:\n+(\d{1,2}:\d{2}))?/g;
-      let match;
-      while ((match = blockRegex.exec(text)) !== null) {
-        const trackTitle = match[1].trim();
-        const artist = match[2].trim();
-        let durationSeconds = 210;
-        if (match[3]) {
-          const [min, sec] = match[3].split(':').map(Number);
-          durationSeconds = min * 60 + sec;
+    for (const pUrl of proxyUrls) {
+      try {
+        const res = await fetch(pUrl, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) continue;
+        let html = await res.text();
+        if (pUrl.includes('allorigins')) {
+          try {
+            const j = JSON.parse(html);
+            html = j.contents || '';
+          } catch (e) {}
         }
 
-        rawTracks.push({
-          id: `sp_${spotifyId}_${rawTracks.length}`,
-          title: trackTitle,
-          artist: artist,
-          thumbnail: cover || '',
-          durationSeconds: durationSeconds || 210,
-          source: 'spotify'
-        });
-      }
+        const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+        if (match) {
+          const data = JSON.parse(match[1]);
+          const state = data.props?.pageProps?.state?.data?.entity;
+          if (state) {
+            title = state.name || state.title || title;
+            const trackList = state.trackList || [];
+            if (trackList.length > 0) {
+              trackList.forEach((item, idx) => {
+                rawTracks.push({
+                  id: `sp_${spotifyId}_${idx}`,
+                  title: item.title || 'Unknown Title',
+                  artist: (item.subtitle || 'Spotify Artist').replace(/\u00a0/g, ' '),
+                  thumbnail: cover || '',
+                  durationSeconds: Math.round((item.duration || 0) / 1000) || 210,
+                  source: 'spotify'
+                });
+              });
+              break;
+            }
+          }
+        }
+      } catch (err) {}
     }
-  } catch (err) {
-    console.warn('Jina AI extraction warning:', err);
+  } catch (e) {}
+
+  // 3. STRATEGY B: Jina AI Web Reader (Robust fallback when embed HTML is behind cloud challenge)
+  if (rawTracks.length === 0) {
+    try {
+      if (onProgress) onProgress(0, 0, 'מפענח את הפלייליסט באמצעות AI Reader...');
+      const jinaUrl = `https://r.jina.ai/${embedUrl}`;
+      const jinaRes = await fetch(jinaUrl, {
+        signal: AbortSignal.timeout(12000)
+      });
+
+      if (jinaRes.ok) {
+        const text = await jinaRes.text();
+        // Match blocks like:
+        // 1.   ### Patient Zero
+        // #### Taylor Swift
+        // 03:45
+        const blockRegex = /(?:^|\n)(?:\d+[\.\)]\s+)?###\s+([^\n]+)\n+####\s+(?:E\s+)?([^\n]+)(?:\n+(\d{1,2}:\d{2}))?/g;
+        let match;
+        while ((match = blockRegex.exec(text)) !== null) {
+          const trackTitle = match[1].trim();
+          const artist = match[2].trim();
+          let durationSeconds = 210;
+          if (match[3]) {
+            const [min, sec] = match[3].split(':').map(Number);
+            durationSeconds = min * 60 + sec;
+          }
+
+          rawTracks.push({
+            id: `sp_${spotifyId}_${rawTracks.length}`,
+            title: trackTitle,
+            artist: artist,
+            thumbnail: cover || '',
+            durationSeconds: durationSeconds || 210,
+            source: 'spotify'
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('Jina AI extraction warning:', err);
+    }
   }
 
-  // 3. Single track fallback
+  // 4. Single track fallback
   if (rawTracks.length === 0 && type === 'track') {
     rawTracks.push({
       id: `sp_${spotifyId}`,
@@ -221,7 +283,7 @@ async function importSpotifyPlaylist(rawUrl, onProgress) {
     throw new Error('לא הצלחנו לקרוא את השירים מהפלייליסט. ודא שהפלייליסט בספוטיפיי מוגדר כציבורי (Public).');
   }
 
-  // 4. Enrich every track with 600x600 HD artwork and direct Apple CDN audio stream
+  // 5. Enrich every track with 600x600 HD artwork and metadata
   if (onProgress) onProgress(0, rawTracks.length, 'מתאים עטיפות HD 600x600 וקובצי שמע...');
   const enrichedTracks = await enrichTracksWithItunes(rawTracks, onProgress);
 
@@ -247,7 +309,6 @@ async function importYouTubePlaylist(url) {
   if (playlistMatch) {
     const playlistId = playlistMatch[1];
     const invidiousHosts = [
-      'https://invidious.f5.si',
       'https://invidious.nerdvpn.de',
       'https://inv.nadeko.net'
     ];

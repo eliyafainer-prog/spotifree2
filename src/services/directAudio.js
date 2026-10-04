@@ -1,42 +1,48 @@
 // Direct Music Search & Audio Engine for SpotiFree V2
 // Delivers 100% native HTML5 background playback, ZERO ads, full 3-5 minute songs, and instant cached starts!
 
-const INVIDIOUS_INSTANCES = [
-  'https://invidious.f5.si'
+const SOUNDCLOUD_CLIENT_IDS = [
+  'dkevB9EsY4jIoSm8RfddPNUKyn6hurXF',
+  '103X7p3c5t1eKqLhZk0m3nF4a5s6d7f8',
+  'b46b25aa3d3edd797d8e688963c69fe7'
 ];
 
-// In-memory cache for resolved audio streams & video IDs
+// In-memory cache for resolved audio streams
 const streamCache = new Map();
-const videoIdCache = new Map();
 
 function getCacheKey(title, artist = '') {
   return `${(title || '').trim().toLowerCase()}:::${(artist || '').trim().toLowerCase()}`;
 }
 
 /**
- * Smart candidate scoring algorithm:
- * Strongly favors Topic tracks, Official Audio, and Lyrics
- * Heavily penalizes official video clips (which are monetized with video ads)
+ * Smart candidate scoring algorithm for SoundCloud results:
+ * Rewards close title & artist matching and duration matching
+ * Penalizes snippets < 50s and extreme length tracks
  */
-function rankVideo(item, cleanTitle, cleanArtist) {
+function rankCandidate(item, cleanTitle, cleanArtist, expectedDuration) {
   let score = 0;
   const t = (item.title || '').toLowerCase();
-  const a = (item.author || '').toLowerCase();
+  const a = (item.user?.username || '').toLowerCase();
   const targetTitle = (cleanTitle || '').toLowerCase();
   const targetArtist = (cleanArtist || '').toLowerCase();
+  const durationSec = Math.round((item.duration || 0) / 1000);
 
-  // 1. Title matching
+  // 1. Duration filter: strictly reject snippets (< 50s)
+  if (durationSec < 50) return -1000;
+  if (durationSec > 600) score -= 100;
+
+  // 2. Title matching
   if (targetTitle) {
     if (t.includes(targetTitle)) {
-      score += 100;
+      score += 120;
     } else {
       const words = targetTitle.split(/\s+/).filter(w => w.length > 1);
       const matches = words.filter(w => t.includes(w));
-      score += (matches.length / (words.length || 1)) * 60;
+      score += (matches.length / (words.length || 1)) * 70;
     }
   }
 
-  // 2. Artist matching
+  // 3. Artist matching
   if (targetArtist) {
     if (t.includes(targetArtist) || a.includes(targetArtist)) {
       score += 80;
@@ -47,20 +53,24 @@ function rankVideo(item, cleanTitle, cleanArtist) {
     }
   }
 
-  // 3. Audio/Topic bonuses: Topic tracks & audio-only releases have cleaner stream data
-  if (a.includes('topic')) score += 120;
-  if (t.includes('audio') || t.includes('אודיו')) score += 90;
-  if (t.includes('lyrics') || t.includes('מילים')) score += 60;
-
-  // 4. Penalize official music video clips (which are often blocked or have ads)
-  if (t.includes('official music video') || t.includes('official video') || t.includes('קליפ רשמי') || t.includes('הקליפ הרשמי') || t.includes('clip')) {
-    score -= 60;
+  // 4. Proximity to expected duration (if known)
+  if (expectedDuration && expectedDuration > 45) {
+    const diff = Math.abs(durationSec - expectedDuration);
+    if (diff <= 15) score += 60;
+    else if (diff <= 35) score += 30;
+    else if (diff > 120) score -= 50;
   }
 
-  // 5. Duration sanity check (typical songs are 60s to 500s)
-  if (item.lengthSeconds >= 80 && item.lengthSeconds <= 450) score += 30;
-  if (item.lengthSeconds > 600 || item.lengthSeconds < 45) score -= 150;
-  if (t.includes('10 hours') || t.includes('שעות') || t.includes('remix') || t.includes('cover') || t.includes('קאבר')) score -= 60;
+  // 5. Prefer original/official or non-distorted tracks
+  if (t.includes('mashup') || t.includes('remix') || t.includes('רמיקס')) score -= 15;
+  if (t.includes('slowed') || t.includes('sped up')) score -= 25;
+  if (t.includes('cover') || t.includes('קאבר')) score -= 40;
+
+  // 6. Progressive stream bonus
+  const trans = item.media?.transcodings || [];
+  if (trans.some(x => x.format?.protocol === 'progressive')) {
+    score += 30;
+  }
 
   return score;
 }
@@ -99,21 +109,41 @@ export async function searchTracks(query, limit = 24) {
     console.warn('iTunes search failed:', e);
   }
 
-  // 2. Secondary fallback: YouTube / Invidious Search
-  for (const base of INVIDIOUS_INSTANCES) {
+  // 2. Secondary fallback: SoundCloud Search
+  for (const clientId of SOUNDCLOUD_CLIENT_IDS) {
     try {
-      const res = await fetch(`${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`, { signal: AbortSignal.timeout(2500) });
+      const scUrl = `https://api-v2.soundcloud.com/search/tracks?q=${encodeURIComponent(q)}&client_id=${clientId}&limit=${limit}`;
+      const res = await fetch(scUrl, { signal: AbortSignal.timeout(3000) });
       if (res.ok) {
-        const items = await res.json();
-        if (Array.isArray(items) && items.length > 0) {
-          const videoItems = items.filter(it => (it.type === 'video' || !it.type) && it.videoId);
-          const songs = videoItems.filter(it => it.lengthSeconds >= 45 && it.lengthSeconds <= 600);
-          const chosen = songs.length > 0 ? songs : videoItems;
-          return chosen.slice(0, limit).map(item => normalizeInvidiousTrack(item));
+        const data = await res.json();
+        const items = (data.collection || []).filter(it => (it.duration || 0) >= 50000);
+        if (items.length > 0) {
+          return items.map(item => normalizeSoundCloudTrack(item));
         }
       }
     } catch (e) {}
   }
+
+  // 3. Tertiary fallback: Audius Search
+  try {
+    const aRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=SpotiFree`, {
+      signal: AbortSignal.timeout(2500)
+    });
+    if (aRes.ok) {
+      const aData = await aRes.json();
+      const items = (aData.data || []).filter(it => (it.duration || 0) >= 50);
+      if (items.length > 0) {
+        return items.slice(0, limit).map(item => ({
+          id: `audius_${item.id}`,
+          title: item.title,
+          artist: item.user?.name || 'Audius Artist',
+          thumbnail: item.artwork?.['480x480'] || item.artwork?.['150x150'] || '',
+          durationSeconds: item.duration || 210,
+          source: 'audius'
+        }));
+      }
+    }
+  } catch (e) {}
 
   return [];
 }
@@ -125,18 +155,18 @@ export async function searchTracks(query, limit = 24) {
  * 2. ZERO YouTube video ads (direct audio stream, no <iframe>).
  * 3. FULL SONG DURATION (never capped at 30 seconds).
  * 4. ZERO annoying clicking/looping noises.
- * 5. Instant start via localStorage cache.
+ * 5. Instant start via memory & localStorage cache.
  */
 export async function resolveDirectAudioStream(track, forceRefresh = false) {
   if (!track) throw new Error('No track provided');
 
   const key = getCacheKey(track.title, track.artist);
 
-  // 1. Check in-memory & local cache (valid for 4 hours)
+  // 1. Check in-memory & local cache (valid for 6 hours)
   if (!forceRefresh) {
     if (streamCache.has(key)) {
       const cached = streamCache.get(key);
-      if (Date.now() - (cached.timestamp || 0) < 4 * 3600 * 1000) {
+      if (Date.now() - (cached.timestamp || 0) < 6 * 3600 * 1000) {
         return cached;
       }
     }
@@ -144,7 +174,7 @@ export async function resolveDirectAudioStream(track, forceRefresh = false) {
       const stored = localStorage.getItem(`spotifree_stream_${key}`);
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (parsed?.streamUrl && (Date.now() - (parsed.timestamp || 0) < 4 * 3600 * 1000)) {
+        if (parsed?.streamUrl && (Date.now() - (parsed.timestamp || 0) < 6 * 3600 * 1000)) {
           streamCache.set(key, parsed);
           return parsed;
         }
@@ -155,6 +185,7 @@ export async function resolveDirectAudioStream(track, forceRefresh = false) {
   const cleanTitle = (track.title || '')
     .replace(/[\(\[\{].*?[\)\]\}]/g, '')
     .replace(/\s+-\s+Single$/i, '')
+    .replace(/\s+-\s+EP$/i, '')
     .trim();
   const cleanArtist = (track.artist || '')
     .replace(/[\(\[\{].*?[\)\]\}]/g, '')
@@ -162,95 +193,80 @@ export async function resolveDirectAudioStream(track, forceRefresh = false) {
     .split('&')[0]
     .trim();
 
-  // Helper to extract audio stream from an Invidious video endpoint
-  const tryExtractFromVideoId = async (vid) => {
-    for (const inst of INVIDIOUS_INSTANCES) {
+  const expectedDuration = track.durationSeconds || (track.rawTrack?.trackTimeMillis ? Math.round(track.rawTrack.trackTimeMillis / 1000) : null);
+
+  // Search queries: full query, then title only
+  const queries = [];
+  if (cleanTitle && cleanArtist) queries.push(`${cleanTitle} ${cleanArtist}`);
+  if (cleanTitle) queries.push(cleanTitle);
+
+  // Step A: Primary Audio Engine -> SoundCloud High-Fidelity Audio API
+  for (const clientId of SOUNDCLOUD_CLIENT_IDS) {
+    for (const q of queries) {
       try {
-        const res = await fetch(`${inst}/api/v1/videos/${vid}`, { signal: AbortSignal.timeout(2500) });
+        const url = `https://api-v2.soundcloud.com/search/tracks?q=${encodeURIComponent(q)}&client_id=${clientId}&limit=10`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(3200) });
         if (!res.ok) continue;
         const data = await res.json();
-        const audioFormats = data.adaptiveFormats?.filter(f => f.type?.includes('audio') || f.container === 'm4a' || f.container === 'webm');
-        if (!audioFormats || audioFormats.length === 0) continue;
+        const items = (data.collection || []).filter(it => (it.duration || 0) >= 50000);
+        if (items.length === 0) continue;
 
-        // Prefer m4a (universal browser support across iOS & Android)
-        const chosen = audioFormats.find(f => f.container === 'm4a') || audioFormats[0];
-        let streamUrl = chosen.url;
-        if (!streamUrl.startsWith('http')) streamUrl = `${inst}${streamUrl}`;
+        // Rank candidates
+        items.sort((a, b) => rankCandidate(b, cleanTitle, cleanArtist, expectedDuration) - rankCandidate(a, cleanTitle, cleanArtist, expectedDuration));
 
-        return {
-          streamUrl,
-          durationSeconds: data.lengthSeconds || track.durationSeconds || 210,
-          videoId: vid,
-          thumbnail: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
-          source: 'invidious'
-        };
+        for (const cand of items.slice(0, 3)) {
+          const trans = cand.media?.transcodings || [];
+          if (trans.length === 0) continue;
+
+          // Prefer progressive MP3 (universal native browser support, lowest latency)
+          const prog = trans.find(t => t.format?.protocol === 'progressive');
+          const hls = trans.find(t => t.format?.protocol === 'hls' && t.format?.mime_type?.includes('mpeg')) || trans.find(t => t.format?.protocol === 'hls') || trans[0];
+          const chosen = prog || hls;
+
+          if (chosen) {
+            const streamRes = await fetch(`${chosen.url}?client_id=${clientId}`, { signal: AbortSignal.timeout(3000) });
+            if (streamRes.ok) {
+              const streamData = await streamRes.json();
+              if (streamData.url) {
+                const finalRes = {
+                  streamUrl: streamData.url,
+                  isHls: chosen.format?.protocol === 'hls',
+                  durationSeconds: Math.round(cand.duration / 1000),
+                  title: cand.title,
+                  artist: cand.user?.username || track.artist,
+                  thumbnail: cand.artwork_url || track.thumbnail,
+                  source: 'soundcloud',
+                  timestamp: Date.now()
+                };
+                streamCache.set(key, finalRes);
+                try { localStorage.setItem(`spotifree_stream_${key}`, JSON.stringify(finalRes)); } catch (e) {}
+                return finalRes;
+              }
+            }
+          }
+        }
       } catch (e) {}
     }
-    return null;
-  };
-
-  // Step A: If track already has videoId, try it directly
-  let initialVideoId = track.videoId;
-  if (!initialVideoId && track.id?.startsWith('yt_')) {
-    initialVideoId = track.id.replace('yt_', '');
-  }
-  if (initialVideoId) {
-    const directResult = await tryExtractFromVideoId(initialVideoId);
-    if (directResult) {
-      const finalRes = { ...directResult, timestamp: Date.now() };
-      streamCache.set(key, finalRes);
-      try { localStorage.setItem(`spotifree_stream_${key}`, JSON.stringify(finalRes)); } catch (e) {}
-      return finalRes;
-    }
   }
 
-  // Step B: Search for clean, ad-free audio/topic tracks on Invidious
-  const query = `${cleanTitle} ${cleanArtist}`.trim();
-
-  for (const inst of INVIDIOUS_INSTANCES) {
-    try {
-      const sRes = await fetch(`${inst}/api/v1/search?q=${encodeURIComponent(query)}&type=video`, {
-        signal: AbortSignal.timeout(2500)
-      });
-      if (!sRes.ok) continue;
-      const items = await sRes.json();
-      if (!Array.isArray(items) || items.length === 0) continue;
-
-      const candidates = items.filter(it => (it.type === 'video' || !it.type) && it.videoId && it.lengthSeconds >= 45 && it.lengthSeconds <= 600);
-      if (candidates.length === 0) continue;
-
-      candidates.sort((a, b) => rankVideo(b, cleanTitle, cleanArtist) - rankVideo(a, cleanTitle, cleanArtist));
-
-      // Test top 3 candidates sequentially
-      for (const cand of candidates.slice(0, 3)) {
-        const directResult = await tryExtractFromVideoId(cand.videoId);
-        if (directResult) {
-          const finalRes = {
-            ...directResult,
-            durationSeconds: cand.lengthSeconds || directResult.durationSeconds,
-            timestamp: Date.now()
-          };
-          streamCache.set(key, finalRes);
-          try { localStorage.setItem(`spotifree_stream_${key}`, JSON.stringify(finalRes)); } catch (e) {}
-          return finalRes;
-        }
-      }
-    } catch (e) {}
-  }
-
-  // Step C: Audius open decentralized audio network fallback
+  // Step B: Audius open decentralized audio network fallback
   try {
-    const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(cleanTitle + ' ' + cleanArtist)}&app_name=SpotiFree`, {
+    const audiusQuery = `${cleanTitle} ${cleanArtist}`.trim();
+    const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(audiusQuery)}&app_name=SpotiFree`, {
       signal: AbortSignal.timeout(2500)
     });
     if (audiusRes.ok) {
       const d = await audiusRes.json();
-      const first = d.data?.[0];
+      const first = (d.data || []).find(it => (it.duration || 0) >= 50);
       if (first?.id) {
         const streamUrl = `https://discoveryprovider.audius.co/v1/tracks/${first.id}/stream?app_name=SpotiFree`;
         const finalRes = {
           streamUrl,
+          isHls: false,
           durationSeconds: first.duration || track.durationSeconds || 210,
+          title: first.title,
+          artist: first.user?.name || track.artist,
+          thumbnail: first.artwork?.['480x480'] || track.thumbnail,
           source: 'audius',
           timestamp: Date.now()
         };
@@ -277,35 +293,23 @@ export async function resolveYouTubeVideo(title, artist = '') {
 }
 
 /**
- * Normalizes Invidious / YouTube video to standard SpotiFree Track model
+ * Normalizes SoundCloud track to standard SpotiFree Track model
  */
-function normalizeInvidiousTrack(item) {
-  let title = item.title || 'Unknown Title';
-  let artist = item.author || 'YouTube';
-
-  if (title.includes(' - ')) {
-    const parts = title.split(' - ');
-    if (parts.length >= 2) {
-      artist = parts[0].trim();
-      title = parts.slice(1).join(' - ').trim();
-    }
+function normalizeSoundCloudTrack(item) {
+  let thumbnail = item.artwork_url || '';
+  if (thumbnail && thumbnail.includes('large.jpg')) {
+    thumbnail = thumbnail.replace('large.jpg', 't500x500.jpg');
   }
 
-  title = title
-    .replace(/(\[|\()(official\s*(music)?\s*video|official\s*audio|קליפ\s*רשמי|הקליפ\s*הרשמי|אודיו\s*רשמי|audio|lyrics)(\]|\))/gi, '')
-    .trim();
-
-  const videoId = item.videoId;
-  const durationSeconds = item.lengthSeconds || 210;
+  const durationSeconds = Math.round((item.duration || 0) / 1000) || 210;
 
   return {
-    id: `yt_${videoId}`,
-    videoId,
-    title,
-    artist,
-    thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    id: `sc_${item.id}`,
+    title: item.title || 'Unknown Title',
+    artist: item.user?.username || 'SoundCloud Artist',
+    thumbnail: thumbnail || '',
     durationSeconds,
-    source: 'youtube',
+    source: 'soundcloud',
     rawTrack: item
   };
 }
