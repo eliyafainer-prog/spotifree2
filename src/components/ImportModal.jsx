@@ -1,17 +1,12 @@
 import React, { useState } from 'react';
-import { X, DownloadCloud, Loader2, Music, Check, Sparkles, ListPlus, Link2, ClipboardPaste, AlertCircle } from 'lucide-react';
-import { importPlaylistFromUrl, importPlaylistFromTextList } from '../services/spotifyImport';
+import { X, DownloadCloud, Loader2, Music, Check, Sparkles, Link2, AlertCircle, Play } from 'lucide-react';
+import { importPlaylistFromUrl } from '../services/spotifyImport';
 
 export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
-  const [tab, setTab] = useState('link'); // 'link' | 'ai'
   const [url, setUrl] = useState('');
-  const [textList, setTextList] = useState('');
-  const [playlistTitle, setPlaylistTitle] = useState('');
-  const [spotifyCover, setSpotifyCover] = useState('');
   const [loading, setLoading] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const [preview, setPreview] = useState(null);
 
   if (!isOpen) return null;
@@ -22,62 +17,20 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
 
     setLoading(true);
     setError('');
-    setNotice('');
-    setProgressMsg('מפענח קישור ומייבא שירים...');
+    setProgressMsg('מפענח קישור באמצעות AI Reader...');
     setPreview(null);
 
     try {
-      const result = await importPlaylistFromUrl(url.trim());
+      const result = await importPlaylistFromUrl(url.trim(), (current, total, trackName) => {
+        if (total > 0) {
+          setProgressMsg(`מתאים עטיפות HD וקובצי שמע (${current}/${total}): "${trackName.substring(0, 24)}..."`);
+        } else {
+          setProgressMsg(trackName || 'מחלץ שירים מהפלייליסט...');
+        }
+      });
       setPreview(result);
     } catch (err) {
-      setError(err.message || 'נכשל פיענוח הקישור. ודא שהפלייליסט ציבורי ותקין.');
-    } finally {
-      setLoading(false);
-      setProgressMsg('');
-    }
-  };
-
-  const handlePasteFromClipboard = async () => {
-    try {
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        const text = await navigator.clipboard.readText();
-        if (text) {
-          setTextList(prev => prev ? `${prev}\n${text}` : text);
-        }
-      }
-    } catch (e) {
-      console.warn('Clipboard access not allowed:', e);
-    }
-  };
-
-  const handleFetchSmartList = async (e) => {
-    e?.preventDefault();
-    if (!textList.trim()) {
-      setError('נא להזין או להדביק לפחות שם שיר אחד');
-      return;
-    }
-
-    setLoading(true);
-    setError('');
-    setNotice('');
-    setPreview(null);
-
-    try {
-      const result = await importPlaylistFromTextList(
-        playlistTitle.trim() || 'פלייליסט מיובא',
-        textList,
-        (current, total, currentName) => {
-          setProgressMsg(`מעבד שיר ${current} מתוך ${total}: "${currentName.substring(0, 28)}..."`);
-        }
-      );
-
-      if (spotifyCover && !result.cover) {
-        result.cover = spotifyCover;
-      }
-
-      setPreview(result);
-    } catch (err) {
-      setError(err.message || 'נכשל איתור השירים ברשימה');
+      setError(err.message || 'נכשל פיענוח הקישור. ודא שהפלייליסט בספוטיפיי מוגדר כציבורי (Public).');
     } finally {
       setLoading(false);
       setProgressMsg('');
@@ -99,27 +52,30 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
     onPlaylistImported(newPlaylist);
     onClose();
     setUrl('');
-    setTextList('');
-    setPlaylistTitle('');
-    setSpotifyCover('');
     setPreview(null);
   };
 
-  const sampleYouTubeUrl = 'https://www.youtube.com/playlist?list=PLMC9KNkIncKtPzgY-5rmhvj7fax8fdxoj';
   const sampleSpotifyUrl = 'https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M';
+  const sampleYouTubeUrl = 'https://www.youtube.com/playlist?list=PLMC9KNkIncKtPzgY-5rmhvj7fax8fdxoj';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-spotify-dark border border-spotify-border rounded-xl max-w-lg w-full p-6 flex flex-col gap-4 shadow-2xl relative max-h-[90vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-9 h-9 rounded-full bg-spotify-green/20 text-spotify-green flex items-center justify-center shadow">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-full bg-spotify-green/20 text-spotify-green flex items-center justify-center shadow-lg">
               <DownloadCloud className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="font-bold text-lg text-white">ייבוא פלייליסט חכם</h2>
-              <p className="text-[11px] text-spotify-subtext">ייבוא שירים עם שמות, עטיפות ואורכים מדויקים של ספוטיפיי</p>
+              <div className="flex items-center gap-2">
+                <h2 className="font-bold text-lg text-white">ייבוא פלייליסט חכם</h2>
+                <span className="text-[10px] bg-spotify-green/20 text-spotify-green font-bold px-2 py-0.5 rounded-full flex items-center gap-1 border border-spotify-green/30">
+                  <Sparkles className="w-3 h-3" />
+                  AI Powered
+                </span>
+              </div>
+              <p className="text-xs text-spotify-subtext">ייבוא אוטומטי מלא עם עטיפות HD 600x600 וקובצי שמע רשמיים</p>
             </div>
           </div>
           <button
@@ -130,180 +86,131 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
           </button>
         </div>
 
-        {/* Tab Switcher */}
-        <div className="flex gap-2 p-1 bg-spotify-elevated rounded-lg border border-spotify-border">
-          <button
-            onClick={() => { setTab('link'); setError(''); setNotice(''); setPreview(null); }}
-            className={`flex-1 py-2 px-3 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-              tab === 'link' ? 'bg-spotify-green text-black shadow-md' : 'text-spotify-subtext hover:text-white'
-            }`}
-          >
-            <Link2 className="w-4 h-4" />
-            <span>הזנת קישור (URL)</span>
-          </button>
-          <button
-            onClick={() => { setTab('ai'); setError(''); setNotice(''); setPreview(null); }}
-            className={`flex-1 py-2 px-3 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-              tab === 'ai' ? 'bg-spotify-green text-black shadow-md' : 'text-spotify-subtext hover:text-white'
-            }`}
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>ייבוא חכם AI / טקסט</span>
-          </button>
-        </div>
-
-        {/* Notice Banner */}
-        {notice && (
-          <div className="p-3 bg-emerald-950/40 border border-emerald-500/40 rounded-lg text-xs text-emerald-300 flex items-start gap-2 animate-fadeIn">
-            <Sparkles className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
-            <span>{notice}</span>
-          </div>
-        )}
-
-        {/* Tab 1: Link Import */}
-        {tab === 'link' && (
-          <form onSubmit={handleFetchLink} className="flex flex-col gap-3">
-            <label className="text-xs font-semibold text-spotify-subtext">
-              הדבק כאן קישור לפלייליסט מספוטיפיי או מיוטיוב:
-            </label>
-            <div className="flex gap-2">
+        {/* URL Form */}
+        <form onSubmit={handleFetchLink} className="flex flex-col gap-3">
+          <label className="text-xs font-semibold text-spotify-subtext">
+            הדבק קישור לפלייליסט, אלבום או שיר מספוטיפיי או מיוטיוב:
+          </label>
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Link2 className="w-4 h-4 text-spotify-subtext absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
-                placeholder="https://open.spotify.com/playlist/... או יוטיוב"
+                placeholder="https://open.spotify.com/playlist/... או קישור יוטיוב"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 autoFocus
-                className="flex-1 bg-spotify-elevated text-white text-sm px-3.5 py-2.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none transition-colors"
-              />
-              <button
-                type="submit"
-                disabled={loading || !url.trim()}
-                className="bg-spotify-green hover:bg-spotify-green-hover disabled:opacity-50 text-black font-bold px-5 py-2 rounded-lg text-sm transition-all flex items-center gap-2"
-              >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'טען'}
-              </button>
-            </div>
-
-            {loading && progressMsg && (
-              <p className="text-xs text-spotify-green animate-pulse flex items-center gap-1.5">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>{progressMsg}</span>
-              </p>
-            )}
-
-            <div className="text-[11px] text-spotify-subtext flex flex-wrap items-center gap-2 mt-1">
-              <Sparkles className="w-3.5 h-3.5 text-spotify-green" />
-              <span>דוגמאות:</span>
-              <button
-                type="button"
-                onClick={() => setUrl(sampleSpotifyUrl)}
-                className="text-spotify-green underline hover:text-spotify-green-hover"
-              >
-                Today's Top Hits (Spotify)
-              </button>
-              <span>•</span>
-              <button
-                type="button"
-                onClick={() => setUrl(sampleYouTubeUrl)}
-                className="text-spotify-green underline hover:text-spotify-green-hover"
-              >
-                Top Pop Playlist (YouTube)
-              </button>
-            </div>
-          </form>
-        )}
-
-        {/* Tab 2: Smart AI / Text List Import */}
-        {tab === 'ai' && (
-          <form onSubmit={handleFetchSmartList} className="flex flex-col gap-3">
-            <div>
-              <label className="text-xs font-semibold text-spotify-subtext block mb-1">
-                שם הפלייליסט:
-              </label>
-              <input
-                type="text"
-                value={playlistTitle}
-                onChange={(e) => setPlaylistTitle(e.target.value)}
-                placeholder="למשל: הלהיטים שלי, Party 2026..."
-                className="w-full bg-spotify-elevated text-white text-sm px-3.5 py-2.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none"
+                className="w-full bg-spotify-elevated text-white text-sm pr-10 pl-3.5 py-2.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none transition-colors"
               />
             </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-semibold text-spotify-subtext">
-                  הדבק שמות שירים (או קישורי שירים מספוטיפיי):
-                </label>
-                <button
-                  type="button"
-                  onClick={handlePasteFromClipboard}
-                  className="text-[11px] text-spotify-green hover:underline flex items-center gap-1"
-                >
-                  <ClipboardPaste className="w-3 h-3" />
-                  <span>הדבק מהלוח</span>
-                </button>
-              </div>
-              <textarea
-                rows={5}
-                value={textList}
-                onChange={(e) => setTextList(e.target.value)}
-                placeholder={'עדן חסון - שקיעות אדומות\nחנן בן ארי - הלוואי\nColdplay - Viva La Vida\nאו העתק רשימה ישירות מספוטיפיי'}
-                className="w-full bg-spotify-elevated text-white text-sm p-3.5 rounded-lg border border-spotify-border focus:border-spotify-green focus:outline-none font-sans"
-              />
-              <p className="text-[10px] text-spotify-subtext/80 mt-1">
-                💡 המנגנון מנקה אוטומטית מספור (1., 2.), מזהה אמנים, ומצמיד עטיפות HD ואורכי שירים רשמיים.
-              </p>
-            </div>
-
             <button
               type="submit"
-              disabled={loading || !textList.trim()}
-              className="w-full bg-spotify-green hover:bg-spotify-green-hover disabled:opacity-50 text-black font-bold py-3 rounded-lg text-sm transition-all flex items-center justify-center gap-2 shadow-lg shadow-spotify-green/20"
+              disabled={loading || !url.trim()}
+              className="bg-spotify-green hover:bg-spotify-green-hover disabled:opacity-50 text-black font-bold px-5 py-2.5 rounded-lg text-sm transition-all flex items-center gap-2 shadow-lg shadow-spotify-green/20"
             >
               {loading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-xs truncate max-w-xs">{progressMsg || 'מאתר ומייבא שירים ב-AI...'}</span>
+                  <span>מייבא...</span>
                 </>
               ) : (
-                'חפש וצור פלייליסט עם עטיפות רשמיות'
+                'ייבא ב-AI'
               )}
             </button>
-          </form>
-        )}
+          </div>
+
+          {loading && (
+            <div className="p-3 bg-spotify-elevated/70 border border-spotify-green/30 rounded-lg flex items-center gap-2.5 animate-fadeIn">
+              <Loader2 className="w-4 h-4 animate-spin text-spotify-green flex-shrink-0" />
+              <span className="text-xs text-spotify-green font-medium truncate">{progressMsg}</span>
+            </div>
+          )}
+
+          <div className="text-[11px] text-spotify-subtext flex flex-wrap items-center gap-2 mt-0.5">
+            <Sparkles className="w-3.5 h-3.5 text-spotify-green" />
+            <span>דוגמאות לבדיקה מהירה:</span>
+            <button
+              type="button"
+              onClick={() => setUrl(sampleSpotifyUrl)}
+              className="text-spotify-green underline hover:text-spotify-green-hover transition-colors"
+            >
+              Today's Top Hits (Spotify)
+            </button>
+            <span>•</span>
+            <button
+              type="button"
+              onClick={() => setUrl(sampleYouTubeUrl)}
+              className="text-spotify-green underline hover:text-spotify-green-hover transition-colors"
+            >
+              Top Pop Playlist (YouTube)
+            </button>
+          </div>
+        </form>
 
         {/* Error message */}
         {error && (
-          <div className="p-3 bg-red-900/30 border border-red-500/40 rounded-lg text-xs text-red-300 flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          <div className="p-3 bg-red-900/30 border border-red-500/40 rounded-lg text-xs text-red-300 flex items-center gap-2 animate-fadeIn">
+            <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-400" />
             <span>{error}</span>
           </div>
         )}
 
-        {/* Preview of loaded playlist */}
+        {/* Preview of loaded playlist with track list */}
         {preview && (
-          <div className="p-4 bg-spotify-elevated rounded-lg border border-spotify-border flex flex-col gap-3 animate-fadeIn">
-            <div className="flex items-center gap-3">
+          <div className="p-4 bg-spotify-elevated rounded-xl border border-spotify-border flex flex-col gap-3.5 animate-fadeIn">
+            <div className="flex items-center gap-3.5">
               {preview.cover ? (
-                <img src={preview.cover} alt="" className="w-14 h-14 rounded-md object-cover shadow-md flex-shrink-0" />
+                <img src={preview.cover} alt="" className="w-16 h-16 rounded-lg object-cover shadow-lg flex-shrink-0 border border-white/10" />
               ) : (
-                <div className="w-14 h-14 rounded-md bg-spotify-highlight flex items-center justify-center text-spotify-subtext flex-shrink-0">
-                  <Music className="w-6 h-6" />
+                <div className="w-16 h-16 rounded-lg bg-spotify-highlight flex items-center justify-center text-spotify-subtext flex-shrink-0">
+                  <Music className="w-7 h-7" />
                 </div>
               )}
               <div className="flex-1 min-w-0">
-                <h3 className="font-bold text-white text-base truncate">{preview.title}</h3>
-                <p className="text-xs text-spotify-green font-medium">
-                  זוהו {preview.tracks?.length || 0} שירים עם מטא-דאטה ועטיפות מלאות!
+                <span className="text-[11px] uppercase tracking-wider text-spotify-subtext font-bold">{preview.type || 'Playlist'}</span>
+                <h3 className="font-black text-white text-base truncate">{preview.title}</h3>
+                <p className="text-xs text-spotify-green font-medium flex items-center gap-1 mt-0.5">
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{preview.tracks?.length || 0} שירים יובאו עם עטיפות HD ושמע זמין!</span>
                 </p>
               </div>
             </div>
 
+            {/* Scrollable list of imported tracks */}
+            <div className="max-h-52 overflow-y-auto flex flex-col gap-1.5 p-1 bg-black/30 rounded-lg border border-white/5">
+              {preview.tracks?.slice(0, 20).map((t, idx) => (
+                <div key={t.id || idx} className="flex items-center gap-2.5 p-1.5 rounded hover:bg-white/5 transition-colors">
+                  <span className="text-[11px] text-spotify-subtext w-4 text-center font-mono">{idx + 1}</span>
+                  {t.thumbnail ? (
+                    <img src={t.thumbnail} alt="" className="w-8 h-8 rounded object-cover flex-shrink-0" />
+                  ) : (
+                    <div className="w-8 h-8 rounded bg-spotify-highlight flex items-center justify-center flex-shrink-0">
+                      <Music className="w-4 h-4 text-spotify-subtext" />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-bold text-white truncate">{t.title}</p>
+                    <p className="text-[10px] text-spotify-subtext truncate">{t.artist}</p>
+                  </div>
+                  {t.durationSeconds > 0 && (
+                    <span className="text-[10px] text-spotify-subtext font-mono">
+                      {Math.floor(t.durationSeconds / 60)}:{String(t.durationSeconds % 60).padStart(2, '0')}
+                    </span>
+                  )}
+                </div>
+              ))}
+              {preview.tracks?.length > 20 && (
+                <p className="text-center text-[10px] text-spotify-subtext py-1">
+                  ועוד {preview.tracks.length - 20} שירים נוספים...
+                </p>
+              )}
+            </div>
+
             <button
               onClick={handleSave}
-              className="w-full bg-spotify-green hover:bg-spotify-green-hover text-black font-bold py-2.5 rounded-lg text-sm transition-all flex items-center justify-center gap-2 shadow-lg shadow-spotify-green/20"
+              className="w-full bg-spotify-green hover:bg-spotify-green-hover text-black font-black py-3 rounded-lg text-sm transition-all flex items-center justify-center gap-2 shadow-lg shadow-spotify-green/20"
             >
-              <Check className="w-4 h-4" />
+              <Check className="w-4 h-4 stroke-[3]" />
               <span>שמור פלייליסט זה בספרייה שלי</span>
             </button>
           </div>

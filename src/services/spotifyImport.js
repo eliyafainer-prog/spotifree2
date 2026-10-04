@@ -1,12 +1,12 @@
 // AI-Powered Spotify & YouTube Playlist Importer for SpotiFree V2
-// 100% Client-Side, Zero Login Required, Automatic Track Extraction via AI Reader
+// 100% Client-Side, Zero Login Required, Automatic Track Extraction via AI Reader & iTunes HD Enrichment
 
 import { searchTracks } from './directAudio.js';
 
 /**
  * Parses any Spotify or YouTube URL and imports the playlist/tracks automatically
  */
-export async function importPlaylistFromUrl(url) {
+export async function importPlaylistFromUrl(url, onProgress) {
   if (!url || typeof url !== 'string') {
     throw new Error('נא להזין קישור תקין');
   }
@@ -15,7 +15,7 @@ export async function importPlaylistFromUrl(url) {
 
   // 1. Handle Spotify URL
   if (cleanUrl.includes('spotify.com') || cleanUrl.includes('spotify:') || /[a-zA-Z0-9]{22}/.test(cleanUrl)) {
-    return await importSpotifyPlaylist(cleanUrl);
+    return await importSpotifyPlaylist(cleanUrl, onProgress);
   }
 
   // 2. Handle YouTube URL
@@ -57,9 +57,88 @@ function extractSpotifyEntity(input) {
 }
 
 /**
- * Import Spotify Playlist, Album or Track automatically using AI Reader & oEmbed
+ * Enriches tracks concurrently with official iTunes metadata:
+ * - High-resolution 600x600 HD artwork for every single track
+ * - Pristine 256kbps audio previewUrl (Apple CDN, open CORS, works 100% on cellular and mobile)
+ * - Exact official song duration
+ * - Official album and artist title
  */
-async function importSpotifyPlaylist(rawUrl) {
+export async function enrichTracksWithItunes(rawTracks, onProgress) {
+  const chunkSize = 5;
+  const enriched = [];
+
+  for (let i = 0; i < rawTracks.length; i += chunkSize) {
+    const chunk = rawTracks.slice(i, i + chunkSize);
+    const chunkResults = await Promise.all(
+      chunk.map(async (t, chunkIdx) => {
+        const globalIdx = i + chunkIdx;
+        if (onProgress) {
+          onProgress(globalIdx + 1, rawTracks.length, t.title);
+        }
+
+        try {
+          const cleanTitle = (t.title || '')
+            .replace(/[\(\[\{].*?[\)\]\}]/g, '')
+            .replace(/\s+-\s+Single$/i, '')
+            .trim();
+          const cleanArtist = (t.artist || '')
+            .replace(/,/g, ' ')
+            .split('&')[0]
+            .trim();
+
+          const query = encodeURIComponent(`${cleanTitle} ${cleanArtist}`.trim() || t.title);
+          const res = await fetch(`https://itunes.apple.com/search?term=${query}&media=music&entity=song&limit=1`, {
+            signal: AbortSignal.timeout(3500)
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const match = data.results?.[0];
+            if (match) {
+              let thumb = match.artworkUrl100 || '';
+              if (thumb.includes('100x100bb.jpg')) {
+                thumb = thumb.replace('100x100bb.jpg', '600x600bb.jpg');
+              }
+              const durationSeconds = Math.round(match.trackTimeMillis / 1000) || t.durationSeconds;
+              return {
+                id: t.id || `sp_track_${globalIdx}_${Date.now()}`,
+                title: match.trackName || t.title,
+                artist: match.artistName || t.artist,
+                album: match.collectionName || '',
+                thumbnail: thumb || t.thumbnail,
+                durationSeconds,
+                previewUrl: match.previewUrl || '',
+                source: 'spotify',
+                rawTrack: match
+              };
+            }
+          }
+        } catch (e) {
+          console.warn('iTunes enrichment failed for:', t.title, e);
+        }
+
+        return {
+          id: t.id || `sp_track_${globalIdx}_${Date.now()}`,
+          title: t.title,
+          artist: t.artist,
+          thumbnail: t.thumbnail || '',
+          durationSeconds: t.durationSeconds || 210,
+          previewUrl: '',
+          source: 'spotify'
+        };
+      })
+    );
+
+    enriched.push(...chunkResults);
+  }
+
+  return enriched;
+}
+
+/**
+ * Import Spotify Playlist, Album or Track automatically using AI Reader & HD Enrichment
+ */
+async function importSpotifyPlaylist(rawUrl, onProgress) {
   const entity = extractSpotifyEntity(rawUrl);
   if (!entity || !entity.id) {
     throw new Error('לא נראית כתובת ספוטיפיי תקינה. נא להעתיק את הקישור המלא של הפלייליסט מספוטיפיי.');
@@ -87,13 +166,14 @@ async function importSpotifyPlaylist(rawUrl) {
     console.warn('oEmbed fetch warning:', e);
   }
 
-  const tracks = [];
+  const rawTracks = [];
 
   // 2. PRIMARY STRATEGY: Jina AI Web Reader (Extracts all songs, artists, and durations automatically)
   try {
+    if (onProgress) onProgress(0, 0, 'מפענח את הפלייליסט באמצעות AI Reader...');
     const jinaUrl = `https://r.jina.ai/${embedUrl}`;
     const jinaRes = await fetch(jinaUrl, {
-      signal: AbortSignal.timeout(12000)
+      signal: AbortSignal.timeout(15000)
     });
 
     if (jinaRes.ok) {
@@ -102,17 +182,21 @@ async function importSpotifyPlaylist(rawUrl) {
       // 1.   ### Patient Zero
       // #### Taylor Swift
       // 03:45
-      const blockRegex = /(?:^|\n)(?:\d+[\.\)]\s+)?###\s+([^\n]+)\n+####\s+(?:E\s+)?([^\n]+)\n+(\d{1,2}:\d{2})/g;
+      const blockRegex = /(?:^|\n)(?:\d+[\.\)]\s+)?###\s+([^\n]+)\n+####\s+(?:E\s+)?([^\n]+)(?:\n+(\d{1,2}:\d{2}))?/g;
       let match;
       while ((match = blockRegex.exec(text)) !== null) {
-        const [_, trackTitle, artist, durationStr] = match;
-        const [min, sec] = durationStr.split(':').map(Number);
-        const durationSeconds = min * 60 + sec;
+        const trackTitle = match[1].trim();
+        const artist = match[2].trim();
+        let durationSeconds = 210;
+        if (match[3]) {
+          const [min, sec] = match[3].split(':').map(Number);
+          durationSeconds = min * 60 + sec;
+        }
 
-        tracks.push({
-          id: `sp_${spotifyId}_${tracks.length}`,
-          title: trackTitle.trim(),
-          artist: artist.trim(),
+        rawTracks.push({
+          id: `sp_${spotifyId}_${rawTracks.length}`,
+          title: trackTitle,
+          artist: artist,
           thumbnail: cover || '',
           durationSeconds: durationSeconds || 210,
           source: 'spotify'
@@ -123,9 +207,9 @@ async function importSpotifyPlaylist(rawUrl) {
     console.warn('Jina AI extraction warning:', err);
   }
 
-  // 3. SECONDARY STRATEGY: Direct HTML parse fallback (for single tracks or local environments)
-  if (tracks.length === 0 && type === 'track') {
-    tracks.push({
+  // 3. Single track fallback
+  if (rawTracks.length === 0 && type === 'track') {
+    rawTracks.push({
       id: `sp_${spotifyId}`,
       title: title || 'שיר מספוטיפיי',
       artist: 'Spotify Artist',
@@ -135,8 +219,17 @@ async function importSpotifyPlaylist(rawUrl) {
     });
   }
 
-  if (tracks.length === 0) {
+  if (rawTracks.length === 0) {
     throw new Error('לא הצלחנו לקרוא את השירים מהפלייליסט. ודא שהפלייליסט בספוטיפיי מוגדר כציבורי (Public).');
+  }
+
+  // 4. Enrich every track with 600x600 HD artwork and direct Apple CDN audio stream
+  if (onProgress) onProgress(0, rawTracks.length, 'מתאים עטיפות HD 600x600 וקובצי שמע...');
+  const enrichedTracks = await enrichTracksWithItunes(rawTracks, onProgress);
+
+  // If playlist cover was empty or low-res, use the first song's HD cover
+  if (!cover && enrichedTracks.length > 0 && enrichedTracks[0].thumbnail) {
+    cover = enrichedTracks[0].thumbnail;
   }
 
   return {
@@ -144,7 +237,7 @@ async function importSpotifyPlaylist(rawUrl) {
     title,
     cover,
     type: type === 'album' ? 'Album' : 'Playlist',
-    tracks
+    tracks: enrichedTracks
   };
 }
 
@@ -157,31 +250,39 @@ async function importYouTubePlaylist(url) {
     const playlistId = playlistMatch[1];
     const invidiousHosts = [
       'https://invidious.f5.si',
-      'https://invidious.protokolla.fi',
-      'https://inv.riverside.rocks'
+      'https://invidious.nerdvpn.de',
+      'https://inv.nadeko.net'
     ];
 
     for (const host of invidiousHosts) {
       try {
         const res = await fetch(`${host}/api/v1/playlists/${playlistId}`, { signal: AbortSignal.timeout(6000) });
         if (res.ok) {
-          const data = await res.json();
-          const videos = (data.videos || []).filter(v => v.videoId);
-          if (videos.length > 0) {
-            return {
-              id: `pl_yt_${Date.now()}`,
-              title: data.title || 'פלייליסט יוטיוב',
-              cover: videos[0]?.videoThumbnails?.[0]?.url || `https://i.ytimg.com/vi/${videos[0]?.videoId}/hqdefault.jpg`,
-              type: 'YouTube Playlist',
-              tracks: videos.map((v, i) => ({
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('json')) {
+            const data = await res.json();
+            const videos = (data.videos || []).filter(v => v.videoId);
+            if (videos.length > 0) {
+              const rawTracks = videos.map((v, i) => ({
                 id: `yt_${v.videoId || i}`,
+                videoId: v.videoId,
                 title: v.title,
                 artist: v.author || 'YouTube',
                 thumbnail: v.videoThumbnails?.[0]?.url || `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
                 durationSeconds: v.lengthSeconds || 200,
                 source: 'youtube'
-              }))
-            };
+              }));
+
+              const enriched = await enrichTracksWithItunes(rawTracks);
+
+              return {
+                id: `pl_yt_${Date.now()}`,
+                title: data.title || 'פלייליסט יוטיוב',
+                cover: enriched[0]?.thumbnail || `https://i.ytimg.com/vi/${videos[0]?.videoId}/hqdefault.jpg`,
+                type: 'YouTube Playlist',
+                tracks: enriched
+              };
+            }
           }
         }
       } catch (e) {}
@@ -192,19 +293,22 @@ async function importYouTubePlaylist(url) {
   const videoMatch = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([^#&?]+)/);
   if (videoMatch) {
     const videoId = videoMatch[1];
+    const singleRaw = [{
+      id: `yt_${videoId}`,
+      videoId,
+      title: 'YouTube Track',
+      artist: 'YouTube',
+      thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      durationSeconds: 200,
+      source: 'youtube'
+    }];
+    const enriched = await enrichTracksWithItunes(singleRaw);
     return {
       id: `pl_yt_${Date.now()}`,
-      title: 'שיר מיוטיוב',
-      cover: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      title: enriched[0]?.title || 'שיר מיוטיוב',
+      cover: enriched[0]?.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
       type: 'YouTube Video',
-      tracks: [{
-        id: `yt_${videoId}`,
-        title: 'YouTube Track',
-        artist: 'YouTube',
-        thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-        durationSeconds: 200,
-        source: 'youtube'
-      }]
+      tracks: enriched
     };
   }
 
@@ -212,9 +316,7 @@ async function importYouTubePlaylist(url) {
 }
 
 /**
- * Smart AI & Text Playlist Importer
- * Automatically parses song names, artists, Spotify track links, and numbers
- * Resolves high-resolution 600x600 artwork, exact duration, and streamable tracks!
+ * Text Playlist Importer (Legacy / direct search)
  */
 export async function importPlaylistFromTextList(title, textList, onProgress) {
   const rawLines = textList
@@ -226,71 +328,30 @@ export async function importPlaylistFromTextList(title, textList, onProgress) {
     throw new Error('נא להזין לפחות שם שיר אחד או קישור');
   }
 
-  const cleanedQueries = [];
-  for (const raw of rawLines) {
-    if (raw.includes('spotify.com/track/')) {
-      cleanedQueries.push({ isSpotifyTrackUrl: true, url: raw });
-      continue;
+  const rawTracks = rawLines.map((line, idx) => {
+    let t = line.replace(/^[\d]+[\.\)\-:\s]+/, '').trim();
+    let artist = '';
+    if (t.includes(' - ')) {
+      const parts = t.split(' - ');
+      artist = parts[0].trim();
+      t = parts.slice(1).join(' - ').trim();
     }
+    return {
+      id: `custom_${idx}_${Date.now()}`,
+      title: t,
+      artist: artist,
+      durationSeconds: 210,
+      source: 'custom'
+    };
+  });
 
-    const cleaned = raw
-      .replace(/^[\d]+[\.\)\-:\s]+/, '')
-      .replace(/[\(\[]\s*\d+:\d+\s*[\)\]]/g, '')
-      .replace(/\s+-\s+Single$/i, '')
-      .replace(/\s+-\s+EP$/i, '')
-      .trim();
-
-    if (cleaned.length > 1) {
-      cleanedQueries.push({ isSpotifyTrackUrl: false, query: cleaned });
-    }
-  }
-
-  if (cleanedQueries.length === 0) {
-    throw new Error('לא זוהו שירים תקינים בטקסט');
-  }
-
-  const foundTracks = [];
-  const chunkSize = 3;
-  for (let i = 0; i < cleanedQueries.length; i += chunkSize) {
-    const chunk = cleanedQueries.slice(i, i + chunkSize);
-    const chunkResults = await Promise.all(
-      chunk.map(async (item, chunkIdx) => {
-        const globalIdx = i + chunkIdx;
-        try {
-          if (item.isSpotifyTrackUrl) {
-            if (onProgress) onProgress(globalIdx + 1, cleanedQueries.length, 'מחלץ שיר מספוטיפיי...');
-            const oembed = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(item.url)}`).then(r => r.json());
-            if (oembed && oembed.title) {
-              const query = `${oembed.title} ${oembed.author_name || ''}`;
-              const results = await searchTracks(query, 1);
-              if (results && results.length > 0) return results[0];
-            }
-          } else {
-            if (onProgress) onProgress(globalIdx + 1, cleanedQueries.length, item.query);
-            const results = await searchTracks(item.query, 1);
-            if (results && results.length > 0) return results[0];
-          }
-        } catch (e) {}
-        return null;
-      })
-    );
-
-    for (const res of chunkResults) {
-      if (res && !foundTracks.some(t => t.id === res.id)) {
-        foundTracks.push(res);
-      }
-    }
-  }
-
-  if (foundTracks.length === 0) {
-    throw new Error('לא נמצאו קטעי שמע תואמים לשמות שהוזנו');
-  }
+  const enriched = await enrichTracksWithItunes(rawTracks, onProgress);
 
   return {
     id: `pl_custom_${Date.now()}`,
     title: title.trim() || 'פלייליסט מיובא',
-    cover: foundTracks[0]?.thumbnail || '',
+    cover: enriched[0]?.thumbnail || '',
     type: 'Custom Playlist',
-    tracks: foundTracks
+    tracks: enriched
   };
 }

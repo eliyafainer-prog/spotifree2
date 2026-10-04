@@ -159,6 +159,10 @@ export function useAudioPlayer() {
     };
 
     const onEnded = () => {
+      // Guard against false triggers from silent data URI or premature termination (< 2 seconds)
+      if (!audio.src || audio.src.startsWith('data:') || audio.src === SILENT_AUDIO_URI || audio.currentTime < 2) {
+        return;
+      }
       handleNextTrack();
     };
 
@@ -275,12 +279,24 @@ export function useAudioPlayer() {
       if (currentTrackRef.current?.id !== track.id) return;
 
       if (audioRef.current && streamUrl) {
+        audioRef.current.pause();
         audioRef.current.loop = false;
         audioRef.current.src = streamUrl;
         audioRef.current.currentTime = 0;
+
+        // Keep React state in sync with enriched artwork & duration
+        setCurrentTrack({ ...track });
+        if (track.durationSeconds) {
+          setDuration(track.durationSeconds);
+        }
+
         if (!userPausedRef.current) {
-          await audioRef.current.play();
-          setIsPlaying(true);
+          try {
+            await audioRef.current.play();
+            setIsPlaying(true);
+          } catch (playErr) {
+            console.warn('Play attempt failed:', playErr);
+          }
         }
         setIsLoading(false);
       }
