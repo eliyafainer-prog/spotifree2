@@ -1,13 +1,16 @@
 // Direct Music Search & Audio Engine for SpotiFree V2
-// Delivers FULL 3-5 minute songs, ZERO 30s previews, 100% free with background playback!
+// Delivers FULL 3-5 minute songs, ZERO 30s previews, ZERO ads, 100% free with background playback!
 
 const INVIDIOUS_INSTANCES = [
   'https://invidious.f5.si',
   'https://invidious.nerdvpn.de',
-  'https://inv.nadeko.net'
+  'https://inv.nadeko.net',
+  'https://iv.melmac.space',
+  'https://invidious.drgns.space'
 ];
 
-// In-memory cache for resolved video IDs
+// In-memory cache for resolved audio streams & video IDs
+const streamCache = new Map();
 const videoIdCache = new Map();
 
 function getCacheKey(title, artist = '') {
@@ -15,22 +18,45 @@ function getCacheKey(title, artist = '') {
 }
 
 /**
- * Smart ranking algorithm to choose the cleanest, ad-free audio stream:
- * Prefers YouTube Music Official Audio / Topic / Lyrics over heavy video clips
+ * Smart candidate scoring algorithm to pick the most accurate, ad-free audio stream:
+ * Strongly matches title & artist, and favors lyrics / clean audio / official topic.
  */
-function rankVideo(item) {
+function scoreCandidate(item, cleanTitle, cleanArtist) {
   let score = 0;
-  const title = (item.title || '').toLowerCase();
-  const author = (item.author || '').toLowerCase();
+  const t = (item.title || '').toLowerCase();
+  const a = (item.author || '').toLowerCase();
+  const targetTitle = cleanTitle.toLowerCase();
+  const targetArtist = cleanArtist.toLowerCase();
 
-  // Prefer clean audio / official topic / lyrics over video clips to minimize video ads
-  if (author.includes('topic')) score += 60;
-  if (title.includes('audio') || title.includes('אודיו')) score += 50;
-  if (title.includes('lyrics') || title.includes('מילים')) score += 35;
-  if (!title.includes('קליפ') && !title.includes('official music video') && !title.includes('official video')) score += 40;
+  // 1. Title match
+  if (t.includes(targetTitle)) {
+    score += 120;
+  } else {
+    const words = targetTitle.split(/\s+/).filter(w => w.length > 1);
+    const matches = words.filter(w => t.includes(w));
+    score += (matches.length / (words.length || 1)) * 70;
+  }
 
-  // Duration sanity check: typical songs are between 90s and 450s (not 30s snippets, not 1-hour mixes)
+  // 2. Artist match
+  if (targetArtist) {
+    if (t.includes(targetArtist) || a.includes(targetArtist)) {
+      score += 100;
+    } else {
+      const aWords = targetArtist.split(/\s+/).filter(w => w.length > 1);
+      const aMatches = aWords.filter(w => t.includes(w) || a.includes(w));
+      score += (aMatches.length / (aWords.length || 1)) * 50;
+    }
+  }
+
+  // 3. Audio/Lyrics bonus
+  if (t.includes('lyrics') || t.includes('מילים')) score += 35;
+  if (t.includes('audio') || t.includes('אודיו')) score += 40;
+  if (a.includes('topic')) score += 50;
+
+  // 4. Sanity check on duration
   if (item.lengthSeconds >= 90 && item.lengthSeconds <= 450) score += 30;
+  if (item.lengthSeconds > 700 || item.lengthSeconds < 50) score -= 150;
+  if (t.includes('hour') || t.includes('שעות') || t.includes('10 hours') || t.includes('remix') || t.includes('קאבר') || t.includes('cover')) score -= 60;
 
   return score;
 }
@@ -59,7 +85,7 @@ export async function searchTracks(query, limit = 24) {
 
   // 2. Secondary fallback: YouTube / Invidious Search
   try {
-    const fetchPromises = INVIDIOUS_INSTANCES.map(base =>
+    const fetchPromises = INVIDIOUS_INSTANCES.slice(0, 3).map(base =>
       fetch(`${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`, { signal: AbortSignal.timeout(5000) })
         .then(async res => {
           if (!res.ok) throw new Error('Not ok');
@@ -73,7 +99,7 @@ export async function searchTracks(query, limit = 24) {
     
     const items = await Promise.any(fetchPromises);
     const videoItems = items.filter(it => (it.type === 'video' || !it.type) && it.videoId);
-    const songs = videoItems.filter(it => it.lengthSeconds >= 40 && it.lengthSeconds <= 900);
+    const songs = videoItems.filter(it => it.lengthSeconds >= 45 && it.lengthSeconds <= 900);
     const chosen = songs.length > 0 ? songs : videoItems;
     return chosen.slice(0, limit).map(item => normalizeInvidiousTrack(item));
   } catch (e) {
@@ -84,8 +110,7 @@ export async function searchTracks(query, limit = 24) {
 }
 
 /**
- * Resolves a high-quality, FULL-LENGTH YouTube videoId for any song (title + artist)
- * Prefers clean Audio / Topic tracks with zero ads!
+ * Resolves a high-quality, FULL-LENGTH YouTube videoId for any song
  */
 export async function resolveYouTubeVideo(title, artist = '') {
   if (!title) return null;
@@ -117,52 +142,210 @@ export async function resolveYouTubeVideo(title, artist = '') {
     .trim();
 
   const queries = [
-    `${cleanTitle} ${cleanArtist} Audio`.trim(),
+    `${cleanTitle} ${cleanArtist} audio`.trim(),
+    `${cleanTitle} ${cleanArtist} lyrics`.trim(),
     `${cleanTitle} ${cleanArtist}`.trim(),
     `${title} ${artist}`.trim(),
     cleanTitle
   ].filter(Boolean);
 
   for (const q of queries) {
-    try {
-      const fetchPromises = INVIDIOUS_INSTANCES.map(base =>
-        fetch(`${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`, { signal: AbortSignal.timeout(5000) })
-          .then(async res => {
-            if (!res.ok) throw new Error('Not ok');
-            const ct = res.headers.get('content-type') || '';
-            if (!ct.includes('json')) throw new Error('Not JSON');
-            const items = await res.json();
-            if (!Array.isArray(items) || items.length === 0) throw new Error('Empty');
-            return items;
-          })
-      );
-      
-      const items = await Promise.any(fetchPromises);
-      const videoItems = items.filter(it => (it.type === 'video' || !it.type) && it.videoId && it.lengthSeconds >= 45 && it.lengthSeconds <= 900);
-      
-      if (videoItems.length > 0) {
-        videoItems.sort((a, b) => rankVideo(b) - rankVideo(a));
-        const valid = videoItems[0];
-        const result = {
-          videoId: valid.videoId,
-          durationSeconds: valid.lengthSeconds || 210,
-          title: valid.title,
-          thumbnail: `https://i.ytimg.com/vi/${valid.videoId}/hqdefault.jpg`
-        };
+    for (const base of INVIDIOUS_INSTANCES.slice(0, 3)) {
+      try {
+        const res = await fetch(`${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video`, { signal: AbortSignal.timeout(4000) });
+        if (!res.ok) continue;
+        const items = await res.json();
+        if (!Array.isArray(items) || items.length === 0) continue;
 
-        videoIdCache.set(key, result);
-        try {
-          localStorage.setItem(`spotifree_yt_${key}`, JSON.stringify(result));
-        } catch (e) {}
+        const videoItems = items.filter(it => (it.type === 'video' || !it.type) && it.videoId && it.lengthSeconds >= 45 && it.lengthSeconds <= 700);
+        if (videoItems.length > 0) {
+          videoItems.sort((a, b) => scoreCandidate(b, cleanTitle, cleanArtist) - scoreCandidate(a, cleanTitle, cleanArtist));
+          const valid = videoItems[0];
+          const result = {
+            videoId: valid.videoId,
+            durationSeconds: valid.lengthSeconds || 210,
+            title: valid.title,
+            thumbnail: `https://i.ytimg.com/vi/${valid.videoId}/hqdefault.jpg`
+          };
 
-        return result;
-      }
-    } catch (err) {
-      // Try next query
+          videoIdCache.set(key, result);
+          try {
+            localStorage.setItem(`spotifree_yt_${key}`, JSON.stringify(result));
+          } catch (e) {}
+
+          return result;
+        }
+      } catch (err) {}
     }
   }
 
   return null;
+}
+
+/**
+ * Resolves a DIRECT, AD-FREE, FULL-LENGTH audio stream URL for HTML5 <audio> tag.
+ * GUARANTEES:
+ * 1. Zero YouTube video ads (no <iframe>, pure direct media stream).
+ * 2. Full song duration (3-5 minutes, never capped at 30 seconds).
+ * 3. Mobile background & lockscreen playback support.
+ */
+export async function resolveDirectAudioStream(track, forceRefresh = false) {
+  if (!track) throw new Error('No track provided');
+
+  const key = getCacheKey(track.title, track.artist);
+
+  // 1. Check in-memory & local cache if not force refreshing
+  if (!forceRefresh) {
+    if (streamCache.has(key)) {
+      const cached = streamCache.get(key);
+      if (Date.now() - cached.timestamp < 3 * 3600 * 1000) {
+        return cached;
+      }
+    }
+    try {
+      const stored = localStorage.getItem(`spotifree_stream_${key}`);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed?.streamUrl && (Date.now() - (parsed.timestamp || 0) < 3 * 3600 * 1000)) {
+          streamCache.set(key, parsed);
+          return parsed;
+        }
+      }
+    } catch (e) {}
+  }
+
+  const cleanTitle = (track.title || '')
+    .replace(/[\(\[\{].*?[\)\]\}]/g, '')
+    .replace(/\s+-\s+Single$/i, '')
+    .trim();
+  const cleanArtist = (track.artist || '')
+    .replace(/[\(\[\{].*?[\)\]\}]/g, '')
+    .replace(/,/g, ' ')
+    .split('&')[0]
+    .trim();
+
+  // Helper to extract & test audio stream from an Invidious video endpoint
+  const tryExtractFromVideoId = async (vid) => {
+    for (const inst of INVIDIOUS_INSTANCES) {
+      try {
+        const res = await fetch(`${inst}/api/v1/videos/${vid}`, { signal: AbortSignal.timeout(4500) });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const audioFormats = data.adaptiveFormats?.filter(f => f.type?.includes('audio') || f.container === 'm4a' || f.container === 'webm');
+        if (!audioFormats || audioFormats.length === 0) continue;
+
+        // Prefer m4a (AAC - 100% universal support on iOS Safari & Chrome)
+        const chosen = audioFormats.find(f => f.container === 'm4a') || audioFormats[0];
+        let streamUrl = chosen.url;
+        if (!streamUrl.startsWith('http')) streamUrl = `${inst}${streamUrl}`;
+
+        // Verify partial content request (HTTP 200 or 206)
+        try {
+          const testRes = await fetch(streamUrl, {
+            headers: { 'Range': 'bytes=0-100' },
+            signal: AbortSignal.timeout(4000)
+          });
+          if (testRes.status === 200 || testRes.status === 206) {
+            return {
+              streamUrl,
+              durationSeconds: data.lengthSeconds || track.durationSeconds || 210,
+              videoId: vid,
+              thumbnail: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+              source: 'invidious'
+            };
+          }
+        } catch (e) {}
+      } catch (e) {}
+    }
+    return null;
+  };
+
+  // Step A: If track already has videoId, try it first
+  let initialVideoId = track.videoId;
+  if (!initialVideoId && track.id?.startsWith('yt_')) {
+    initialVideoId = track.id.replace('yt_', '');
+  }
+  if (initialVideoId) {
+    const directResult = await tryExtractFromVideoId(initialVideoId);
+    if (directResult) {
+      const finalRes = { ...directResult, timestamp: Date.now() };
+      streamCache.set(key, finalRes);
+      try { localStorage.setItem(`spotifree_stream_${key}`, JSON.stringify(finalRes)); } catch (e) {}
+      return finalRes;
+    }
+  }
+
+  // Step B: Search for clean, non-VEVO audio / lyrics on Invidious
+  // Non-VEVO / lyric videos bypass YouTube bot checks and provide pristine direct audio
+  const searchQueries = [
+    `${cleanTitle} ${cleanArtist} audio`.trim(),
+    `${cleanTitle} ${cleanArtist} lyrics`.trim(),
+    `${cleanTitle} ${cleanArtist}`.trim(),
+    `${track.title} ${track.artist}`.trim()
+  ];
+
+  for (const q of searchQueries) {
+    for (const inst of INVIDIOUS_INSTANCES.slice(0, 3)) {
+      try {
+        const sRes = await fetch(`${inst}/api/v1/search?q=${encodeURIComponent(q)}&type=video`, {
+          signal: AbortSignal.timeout(4500)
+        });
+        if (!sRes.ok) continue;
+        const items = await sRes.json();
+        if (!Array.isArray(items) || items.length === 0) continue;
+
+        const candidates = items.filter(it => (it.type === 'video' || !it.type) && it.videoId && it.lengthSeconds >= 45 && it.lengthSeconds <= 600);
+        if (candidates.length === 0) continue;
+
+        candidates.sort((a, b) => scoreCandidate(b, cleanTitle, cleanArtist) - scoreCandidate(a, cleanTitle, cleanArtist));
+
+        for (const cand of candidates.slice(0, 3)) {
+          const directResult = await tryExtractFromVideoId(cand.videoId);
+          if (directResult) {
+            const finalRes = {
+              ...directResult,
+              durationSeconds: cand.lengthSeconds || directResult.durationSeconds,
+              timestamp: Date.now()
+            };
+            streamCache.set(key, finalRes);
+            try { localStorage.setItem(`spotifree_stream_${key}`, JSON.stringify(finalRes)); } catch (e) {}
+            return finalRes;
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // Step C: Audius open decentralized music network fallback
+  try {
+    const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(cleanTitle + ' ' + cleanArtist)}&app_name=SpotiFree`, {
+      signal: AbortSignal.timeout(4500)
+    });
+    if (audiusRes.ok) {
+      const d = await audiusRes.json();
+      const first = d.data?.[0];
+      if (first?.id) {
+        const streamUrl = `https://discoveryprovider.audius.co/v1/tracks/${first.id}/stream?app_name=SpotiFree`;
+        const testRes = await fetch(streamUrl, {
+          headers: { 'Range': 'bytes=0-100' },
+          signal: AbortSignal.timeout(4000)
+        });
+        if (testRes.status === 200 || testRes.status === 206) {
+          const finalRes = {
+            streamUrl,
+            durationSeconds: first.duration || track.durationSeconds || 210,
+            source: 'audius',
+            timestamp: Date.now()
+          };
+          streamCache.set(key, finalRes);
+          try { localStorage.setItem(`spotifree_stream_${key}`, JSON.stringify(finalRes)); } catch (e) {}
+          return finalRes;
+        }
+      }
+    }
+  } catch (e) {}
+
+  throw new Error('לא נמצא מקור שמע פעיל ללא פרסומות לשיר זה');
 }
 
 /**
@@ -243,41 +426,11 @@ export async function getTrendingTracks(limit = 18) {
 }
 
 /**
- * Resolves a playable audio URL (used for downloading tracks offline)
+ * Resolves a playable ad-free audio URL (used for downloading tracks offline)
  */
 export async function getPlayableAudioUrl(track) {
   if (!track) throw new Error('No track provided');
-
-  let videoId = track.videoId;
-  if (!videoId && track.id?.startsWith('yt_')) {
-    videoId = track.id.replace('yt_', '');
-  }
-  if (!videoId) {
-    const resolved = await resolveYouTubeVideo(track.title, track.artist);
-    if (resolved?.videoId) videoId = resolved.videoId;
-  }
-
-  if (videoId) {
-    for (const base of INVIDIOUS_INSTANCES) {
-      try {
-        const streamUrl = `${base}/latest_version?id=${videoId}&itag=140`;
-        return streamUrl;
-      } catch (e) {}
-    }
-  }
-
-  // Fallback: Audius
-  try {
-    const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(track.title + ' ' + (track.artist || ''))}&app_name=SpotiFree`);
-    if (audiusRes.ok) {
-      const d = await audiusRes.json();
-      const first = d.data?.[0];
-      if (first?.id) {
-        return `https://discoveryprovider.audius.co/v1/tracks/${first.id}/stream?app_name=SpotiFree`;
-      }
-    }
-  } catch (e) {}
-
-  throw new Error('לא נמצא מקור שמע זמין להורדה');
+  const resolved = await resolveDirectAudioStream(track);
+  if (!resolved?.streamUrl) throw new Error('לא נמצא קישור שמע זמין להורדה');
+  return resolved.streamUrl;
 }
-

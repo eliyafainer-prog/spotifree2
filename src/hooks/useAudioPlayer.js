@@ -1,13 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { ForegroundService } from '@capawesome-team/capacitor-android-foreground-service';
-import { resolveYouTubeVideo } from '../services/directAudio';
+import { resolveDirectAudioStream } from '../services/directAudio';
 import { addRecentTrack } from '../services/storage';
 import { getOfflineTrack } from '../services/offlineStorage';
 import { recordTrackPlay, recordListeningSeconds } from '../services/analytics';
-
-// Inline Base64 44-byte silent WAV audio to guarantee 100% offline & safe mobile audio lock without 404s
-const SILENT_AUDIO_URI = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
 
 const startNativeForeground = async (track) => {
   if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
@@ -51,9 +48,6 @@ function generateShuffledDeck(length, startingIndex = -1) {
 
 export function useAudioPlayer() {
   const audioRef = useRef(null);
-  const ytPlayerRef = useRef(null);
-  const isYtReadyRef = useRef(false);
-  const activeEngineRef = useRef('youtube'); // 'youtube' | 'audio'
   const wakeLockRef = useRef(null);
 
   const [currentTrack, setCurrentTrack] = useState(null);
@@ -87,6 +81,7 @@ export function useAudioPlayer() {
   const isMutedRef = useRef(false);
   const volumeRef = useRef(0.8);
   const abortControllerRef = useRef(null);
+  const retryCountRef = useRef(0);
 
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
@@ -112,27 +107,39 @@ export function useAudioPlayer() {
     }
   };
 
-  // Helper to send command to YouTube embed (via YT API or postMessage fallback)
-  const sendYtCommand = useCallback((func, args = []) => {
-    if (ytPlayerRef.current && typeof ytPlayerRef.current[func] === 'function') {
+  // Setup MediaSession for lockscreen / mobile background controls
+  const updateMediaSession = useCallback((track) => {
+    if ('mediaSession' in navigator && track) {
       try {
-        ytPlayerRef.current[func](...args);
-        return;
+        let artwork = [];
+        if (track.thumbnail) {
+          artwork = [
+            { src: track.thumbnail, sizes: '96x96', type: 'image/jpeg' },
+            { src: track.thumbnail, sizes: '128x128', type: 'image/jpeg' },
+            { src: track.thumbnail, sizes: '256x256', type: 'image/jpeg' },
+            { src: track.thumbnail, sizes: '512x512', type: 'image/jpeg' }
+          ];
+        }
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: track.title || 'SpotiFree',
+          artist: track.artist || 'ללא פרסומות',
+          album: track.album || 'SpotiFree',
+          artwork
+        });
+
+        navigator.mediaSession.setActionHandler('play', () => togglePlay());
+        navigator.mediaSession.setActionHandler('pause', () => togglePlay());
+        navigator.mediaSession.setActionHandler('nexttrack', () => handleNextTrack());
+        navigator.mediaSession.setActionHandler('previoustrack', () => handlePrevTrack());
+        navigator.mediaSession.setActionHandler('seekto', (details) => {
+          if (typeof details.seekTime === 'number') seek(details.seekTime);
+        });
       } catch (e) {}
-    }
-    const iframe = document.getElementById('spotifree-yt-iframe');
-    if (iframe?.contentWindow) {
-      iframe.contentWindow.postMessage(JSON.stringify({
-        event: 'command',
-        func,
-        args
-      }), '*');
     }
   }, []);
 
-  // Initialize Elements & Listeners
+  // Initialize Native HTML5 Audio Element & Listeners
   useEffect(() => {
-    // 1. Setup HTML5 Audio element (for offline blobs & mobile background keepalive)
     let audio = document.getElementById('spotifree-audio-engine');
     if (!audio) {
       audio = document.createElement('audio');
@@ -148,147 +155,85 @@ export function useAudioPlayer() {
     audioRef.current = audio;
 
     const onAudioTimeUpdate = () => {
-      if (activeEngineRef.current !== 'audio') return;
       setCurrentTime(audio.currentTime);
-      if (audio.duration && !isNaN(audio.duration)) {
+      if (audio.duration && !isNaN(audio.duration) && audio.duration > 0) {
         setDuration(audio.duration);
       }
       recordListeningSeconds(0.25);
     };
 
+    const onAudioDurationChange = () => {
+      if (audio.duration && !isNaN(audio.duration) && audio.duration > 0) {
+        setDuration(audio.duration);
+      }
+    };
+
+    const onAudioPlaying = () => {
+      setIsPlaying(true);
+      setIsLoading(false);
+      requestWakeLock();
+      if (currentTrackRef.current) startNativeForeground(currentTrackRef.current);
+    };
+
+    const onAudioPause = () => {
+      setIsPlaying(false);
+      releaseWakeLock();
+      stopNativeForeground();
+    };
+
+    const onAudioWaiting = () => {
+      setIsLoading(true);
+    };
+
+    const onAudioCanPlay = () => {
+      setIsLoading(false);
+    };
+
     const onAudioEnded = () => {
-      if (activeEngineRef.current !== 'audio') return;
-      if (!audio.src || audio.src.startsWith('data:') || audio.currentTime < 2) return;
+      // Guard against spurious early ended events (e.g. initial buffer hiccup)
+      if (!audio.src || audio.currentTime < 2) return;
       handleNextTrack();
     };
 
-    audio.addEventListener('timeupdate', onAudioTimeUpdate);
-    audio.addEventListener('ended', onAudioEnded);
-
-    // 2. Setup YouTube IFrame Player Element in DOM if not present
-    let iframe = document.getElementById('spotifree-yt-iframe');
-    if (!iframe) {
-      let keeper = document.getElementById('spotifree-yt-keeper');
-      if (!keeper) {
-        keeper = document.createElement('div');
-        keeper.id = 'spotifree-yt-keeper';
-        keeper.style.cssText = 'position:fixed!important;bottom:-9999px!important;right:-9999px!important;width:200px!important;height:200px!important;opacity:0.001!important;pointer-events:none!important;z-index:-9999!important;overflow:hidden!important;';
-        document.body.appendChild(keeper);
-      }
-      iframe = document.createElement('iframe');
-      iframe.id = 'spotifree-yt-iframe';
-      iframe.style.cssText = 'width:200px!important;height:200px!important;border:none!important;';
-      iframe.allow = 'autoplay; encrypted-media';
-      iframe.title = 'SpotiFree Audio Engine';
-      keeper.appendChild(iframe);
-    }
-
-    // 3. PostMessage listener for YouTube IFrame state & time updates
-    const onWindowMessage = (evt) => {
-      if (activeEngineRef.current !== 'youtube') return;
-      try {
-        const data = typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
-        if (!data) return;
-
-        // State changes: 1 = PLAYING, 2 = PAUSED, 0 = ENDED, 3 = BUFFERING
-        if (data.event === 'onStateChange') {
-          if (data.info === 1) {
-            setIsPlaying(true);
-            setIsLoading(false);
-            requestWakeLock();
-            if (currentTrackRef.current) startNativeForeground(currentTrackRef.current);
-          } else if (data.info === 2) {
-            setIsPlaying(false);
-            releaseWakeLock();
-            stopNativeForeground();
-          } else if (data.info === 3) {
-            setIsLoading(true);
-          } else if (data.info === 0) {
-            handleNextTrack();
-          }
-        }
-
-        // Time updates
-        if (data.info && typeof data.info.currentTime === 'number') {
-          setCurrentTime(data.info.currentTime);
-          recordListeningSeconds(0.25);
-        }
-        if (data.info && typeof data.info.duration === 'number' && data.info.duration > 0) {
-          setDuration(data.info.duration);
-        }
-      } catch (e) {}
-    };
-
-    window.addEventListener('message', onWindowMessage);
-
-    // 4. Bind window.YT.Player if library is loaded
-    const bindYt = () => {
-      if (window.YT && window.YT.Player && !ytPlayerRef.current) {
+    const onAudioError = async () => {
+      console.warn('HTML5 Audio error event triggered');
+      // If error occurs, try resolving fresh stream once
+      const track = currentTrackRef.current;
+      if (track && retryCountRef.current < 1 && !userPausedRef.current) {
+        retryCountRef.current += 1;
         try {
-          ytPlayerRef.current = new window.YT.Player('spotifree-yt-iframe', {
-            events: {
-              onReady: (e) => {
-                isYtReadyRef.current = true;
-                e.target.setVolume(Math.round((isMutedRef.current ? 0 : volumeRef.current) * 100));
-              },
-              onStateChange: (e) => {
-                if (activeEngineRef.current !== 'youtube') return;
-                if (e.data === 1) {
-                  setIsPlaying(true);
-                  setIsLoading(false);
-                  const dur = ytPlayerRef.current?.getDuration?.();
-                  if (dur && !isNaN(dur) && dur > 0) setDuration(dur);
-                } else if (e.data === 2) {
-                  setIsPlaying(false);
-                } else if (e.data === 0) {
-                  handleNextTrack();
-                }
-              }
-            }
-          });
-        } catch (err) {}
+          const fresh = await resolveDirectAudioStream(track, true);
+          if (fresh?.streamUrl) {
+            audio.src = fresh.streamUrl;
+            await audio.play();
+            return;
+          }
+        } catch (e) {}
       }
+      setIsLoading(false);
+      setIsPlaying(false);
     };
 
-    if (window.YT && window.YT.Player) {
-      bindYt();
-    } else {
-      const prevCallback = window.onYouTubeIframeAPIReady;
-      window.onYouTubeIframeAPIReady = () => {
-        if (prevCallback) prevCallback();
-        bindYt();
-      };
-    }
+    audio.addEventListener('timeupdate', onAudioTimeUpdate);
+    audio.addEventListener('durationchange', onAudioDurationChange);
+    audio.addEventListener('playing', onAudioPlaying);
+    audio.addEventListener('pause', onAudioPause);
+    audio.addEventListener('waiting', onAudioWaiting);
+    audio.addEventListener('canplay', onAudioCanPlay);
+    audio.addEventListener('ended', onAudioEnded);
+    audio.addEventListener('error', onAudioError);
 
     return () => {
       audio.removeEventListener('timeupdate', onAudioTimeUpdate);
+      audio.removeEventListener('durationchange', onAudioDurationChange);
+      audio.removeEventListener('playing', onAudioPlaying);
+      audio.removeEventListener('pause', onAudioPause);
+      audio.removeEventListener('waiting', onAudioWaiting);
+      audio.removeEventListener('canplay', onAudioCanPlay);
       audio.removeEventListener('ended', onAudioEnded);
-      window.removeEventListener('message', onWindowMessage);
+      audio.removeEventListener('error', onAudioError);
     };
   }, []);
-
-  // Time tracking interval for YouTube Player
-  useEffect(() => {
-    let timer = null;
-    if (isPlaying && activeEngineRef.current === 'youtube') {
-      timer = setInterval(() => {
-        if (ytPlayerRef.current?.getCurrentTime) {
-          const t = ytPlayerRef.current.getCurrentTime();
-          if (typeof t === 'number' && !isNaN(t)) {
-            setCurrentTime(t);
-            recordListeningSeconds(0.25);
-          }
-          const dur = ytPlayerRef.current.getDuration?.();
-          if (dur && !isNaN(dur) && dur > 0) {
-            setDuration(dur);
-          }
-        }
-      }, 250);
-    }
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-  }, [isPlaying]);
 
   // Update volume
   const setVolume = useCallback((val) => {
@@ -299,12 +244,7 @@ export function useAudioPlayer() {
     if (audioRef.current) {
       audioRef.current.volume = clamped;
     }
-    if (ytPlayerRef.current?.setVolume) {
-      ytPlayerRef.current.setVolume(Math.round(clamped * 100));
-    } else {
-      sendYtCommand('setVolume', [Math.round(clamped * 100)]);
-    }
-  }, [sendYtCommand]);
+  }, []);
 
   const toggleMute = useCallback(() => {
     setIsMuted(prev => {
@@ -312,43 +252,15 @@ export function useAudioPlayer() {
       if (audioRef.current) {
         audioRef.current.volume = next ? 0 : volume;
       }
-      if (ytPlayerRef.current?.setVolume) {
-        ytPlayerRef.current.setVolume(next ? 0 : Math.round(volume * 100));
-      } else {
-        sendYtCommand('setVolume', [next ? 0 : Math.round(volume * 100)]);
-      }
       return next;
     });
-  }, [volume, sendYtCommand]);
+  }, [volume]);
 
-  // Setup MediaSession for lockscreen / mobile background controls
-  const updateMediaSession = useCallback((track) => {
-    if ('mediaSession' in navigator && track) {
-      try {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: track.title || 'SpotiFree',
-          artist: track.artist || 'SpotiFree Music',
-          album: track.album || 'SpotiFree',
-          artwork: track.thumbnail ? [
-            { src: track.thumbnail, sizes: '512x512', type: 'image/jpeg' }
-          ] : []
-        });
-
-        navigator.mediaSession.setActionHandler('play', () => togglePlay());
-        navigator.mediaSession.setActionHandler('pause', () => togglePlay());
-        navigator.mediaSession.setActionHandler('nexttrack', () => handleNextTrack());
-        navigator.mediaSession.setActionHandler('previoustrack', () => handlePrevTrack());
-        navigator.mediaSession.setActionHandler('seekto', (details) => {
-          if (typeof details.seekTime === 'number') seek(details.seekTime);
-        });
-      } catch (e) {}
-    }
-  }, []);
-
-  // Main Full-Song Playback Handler
+  // Main Full-Song Playback Handler (100% Ad-Free, Full Length, Mobile Background Support)
   const playTrack = useCallback(async (track, newQueue = null, indexInQueue = -1) => {
     if (!track) return;
     userPausedRef.current = false;
+    retryCountRef.current = 0;
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -383,87 +295,48 @@ export function useAudioPlayer() {
     recordTrackPlay(track);
     updateMediaSession(track);
 
+    const audio = audioRef.current;
+    if (!audio) return;
+
     try {
       // 1. Check if saved offline locally (Blob audio)
       const offline = await getOfflineTrack(track);
       if (offline && offline.audioBlob) {
-        activeEngineRef.current = 'audio';
-        sendYtCommand('pauseVideo');
-
         const blobUrl = URL.createObjectURL(offline.audioBlob);
-        if (audioRef.current && !userPausedRef.current) {
-          audioRef.current.loop = false;
-          audioRef.current.src = blobUrl;
-          audioRef.current.currentTime = 0;
-          await audioRef.current.play();
+        if (!userPausedRef.current) {
+          audio.src = blobUrl;
+          audio.currentTime = 0;
+          await audio.play();
           setIsPlaying(true);
           setIsLoading(false);
         }
         return;
       }
 
-      // 2. Online Full-Track Playback via YouTube Engine (FULL 3-5 MINUTE SONG, ZERO 30s CAPPINGS!)
-      activeEngineRef.current = 'youtube';
-      try { audioRef.current?.pause?.(); } catch (e) {}
-
-      let videoId = track.videoId;
-      if (!videoId && track.id?.startsWith('yt_')) {
-        videoId = track.id.replace('yt_', '');
+      // 2. Online Direct Ad-Free Full-Length Audio Stream
+      const resolved = await resolveDirectAudioStream(track);
+      if (!resolved || !resolved.streamUrl) {
+        throw new Error('No playable stream found');
       }
 
-      // If videoId is not attached yet (e.g. Spotify imported track or iTunes search result), resolve full clean audio
-      if (!videoId) {
-        const resolved = await resolveYouTubeVideo(track.title, track.artist);
-        if (resolved && resolved.videoId) {
-          videoId = resolved.videoId;
-          track.videoId = videoId;
-          if (resolved.durationSeconds) {
-            track.durationSeconds = resolved.durationSeconds;
-            setDuration(resolved.durationSeconds);
-          }
-          if (resolved.thumbnail && (!track.thumbnail || track.thumbnail.includes('placeholder'))) {
-            track.thumbnail = resolved.thumbnail;
-          }
-          setCurrentTrack({ ...track });
-        }
+      // Update track duration and metadata if enriched
+      if (resolved.durationSeconds && resolved.durationSeconds > 0) {
+        track.durationSeconds = resolved.durationSeconds;
+        setDuration(resolved.durationSeconds);
       }
-
-      const iframe = document.getElementById('spotifree-yt-iframe');
-
-      if (videoId) {
-        track.videoId = videoId;
-
-        // Keep mobile audio lock alive in parallel so phone screen lock never interrupts audio
-        if (audioRef.current && (Capacitor.isNativePlatform() || /mobile|android|iphone|ipad/i.test(navigator.userAgent))) {
-          audioRef.current.src = SILENT_AUDIO_URI;
-          audioRef.current.loop = true;
-          audioRef.current.play().catch(() => {});
-        }
-
-        // If YT API player is ready and instantiated, use loadVideoById for instant switch
-        if (isYtReadyRef.current && ytPlayerRef.current?.loadVideoById) {
-          try {
-            ytPlayerRef.current.loadVideoById(videoId);
-            ytPlayerRef.current.playVideo();
-            setIsPlaying(true);
-            setIsLoading(false);
-            return;
-          } catch (e) {}
-        }
-
-        // Direct iframe load: Starts playing immediately with controls=0 and autoplay=1
-        if (iframe) {
-          iframe.src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&enablejsapi=1&playsinline=1&controls=0&origin=${encodeURIComponent(window.location.origin)}`;
-          setIsPlaying(true);
-          setIsLoading(false);
-        }
-        return;
+      if (resolved.videoId) {
+        track.videoId = resolved.videoId;
       }
+      if (resolved.thumbnail && (!track.thumbnail || track.thumbnail.includes('placeholder'))) {
+        track.thumbnail = resolved.thumbnail;
+      }
+      setCurrentTrack({ ...track });
+      updateMediaSession(track);
 
-      // 3. Fallback: Search embed directly inside YouTube player (NO 30s previews EVER!)
-      if (iframe) {
-        const searchQuery = `${track.title} ${track.artist || ''}`.trim();
-        iframe.src = `https://www.youtube-nocookie.com/embed?listType=search&list=${encodeURIComponent(searchQuery)}&autoplay=1&enablejsapi=1&playsinline=1&controls=0&origin=${encodeURIComponent(window.location.origin)}`;
+      if (!userPausedRef.current) {
+        audio.src = resolved.streamUrl;
+        audio.currentTime = 0;
+        await audio.play();
         setIsPlaying(true);
         setIsLoading(false);
       }
@@ -471,50 +344,29 @@ export function useAudioPlayer() {
       console.warn('Playback error:', err);
       setIsLoading(false);
     }
-  }, [sendYtCommand, updateMediaSession]);
+  }, [updateMediaSession]);
 
   const togglePlay = useCallback(() => {
-    if (!currentTrack) return;
+    const audio = audioRef.current;
+    if (!audio || !currentTrackRef.current) return;
 
     if (isPlaying) {
       userPausedRef.current = true;
-      if (activeEngineRef.current === 'youtube') {
-        if (ytPlayerRef.current?.pauseVideo) {
-          ytPlayerRef.current.pauseVideo();
-        } else {
-          sendYtCommand('pauseVideo');
-        }
-      } else {
-        audioRef.current?.pause?.();
-      }
+      audio.pause();
       setIsPlaying(false);
     } else {
       userPausedRef.current = false;
-      if (activeEngineRef.current === 'youtube') {
-        if (ytPlayerRef.current?.playVideo) {
-          ytPlayerRef.current.playVideo();
-        } else {
-          sendYtCommand('playVideo');
-        }
-      } else {
-        audioRef.current?.play?.().catch(console.warn);
-      }
+      audio.play().catch(console.warn);
       setIsPlaying(true);
     }
-  }, [isPlaying, currentTrack, sendYtCommand]);
+  }, [isPlaying]);
 
   const seek = useCallback((time) => {
-    if (activeEngineRef.current === 'youtube') {
-      if (ytPlayerRef.current?.seekTo) {
-        ytPlayerRef.current.seekTo(time, true);
-      } else {
-        sendYtCommand('seekTo', [time, true]);
-      }
-    } else if (audioRef.current) {
+    if (audioRef.current) {
       audioRef.current.currentTime = time;
     }
     setCurrentTime(time);
-  }, [sendYtCommand]);
+  }, []);
 
   // Advance to Next Track
   const handleNextTrack = useCallback(async () => {
@@ -525,15 +377,7 @@ export function useAudioPlayer() {
 
     if (repMode === 'one' && currentTrackRef.current) {
       seek(0);
-      if (activeEngineRef.current === 'youtube') {
-        if (ytPlayerRef.current?.playVideo) {
-          ytPlayerRef.current.playVideo();
-        } else {
-          sendYtCommand('playVideo');
-        }
-      } else {
-        audioRef.current?.play?.().catch(() => {});
-      }
+      audioRef.current?.play?.().catch(() => {});
       return;
     }
 
@@ -569,7 +413,7 @@ export function useAudioPlayer() {
     if (nextIdx >= 0 && nextIdx < q.length) {
       playTrack(q[nextIdx], null, nextIdx);
     }
-  }, [playTrack, seek, sendYtCommand]);
+  }, [playTrack, seek]);
 
   // Previous Track
   const handlePrevTrack = useCallback(() => {
