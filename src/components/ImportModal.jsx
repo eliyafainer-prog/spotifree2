@@ -28,16 +28,6 @@ export function ImportModal({ isOpen, onClose, onPlaylistImported }) {
 
     try {
       const result = await importPlaylistFromUrl(url.trim());
-      
-      // If Spotify oEmbed succeeded but internal tracks require manual/text list due to Spotify CORS
-      if (result.requiresTrackList) {
-        setPlaylistTitle(result.title);
-        if (result.cover) setSpotifyCover(result.cover);
-        setTab('ai');
-        setNotice(`✨ זיהינו בהצלחה את הפלייליסט: "${result.title}"! בגלל אבטחת ספוטיפיי בדפדפן, הדבק כעת את שמות השירים וה-AI ימצא את העטיפות והשמע הרשמיים.`);
-        return;
-      }
-
       setPreview(result);
     } catch (err) {
       setError(err.message || 'נכשל פיענוח הקישור. ודא שהפלייליסט ציבורי ותקין.');

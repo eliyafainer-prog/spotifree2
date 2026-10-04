@@ -2,7 +2,9 @@
 // 100% Free, ZERO Ads, True Mobile Background Playback, Full 3-5 Minute Songs!
 
 const INVIDIOUS_INSTANCES = [
-  'https://invidious.f5.si'
+  'https://invidious.f5.si',
+  'https://invidious.protokolla.fi',
+  'https://inv.riverside.rocks'
 ];
 
 // In-memory cache for resolved audio stream URLs
@@ -160,11 +162,11 @@ export async function getPlayableAudioUrl(track, signal) {
     }
   }
 
-  // 2. Fetch direct audio stream URL from Invidious adaptive formats concurrently
   if (videoId) {
+    // 2. Fetch direct audio stream URL from Invidious adaptive formats concurrently
     try {
       const fetchPromises = INVIDIOUS_INSTANCES.map(base =>
-        fetch(`${base}/api/v1/videos/${videoId}`, { signal: signal || AbortSignal.timeout(5000) })
+        fetch(`${base}/api/v1/videos/${videoId}`, { signal: signal || AbortSignal.timeout(7500) })
           .then(async res => {
             if (!res.ok) throw new Error('Not ok');
             const data = await res.json();
@@ -189,13 +191,22 @@ export async function getPlayableAudioUrl(track, signal) {
     }
 
     // 3. Fallback: Invidious direct audio stream endpoint
-    const randomInstance = INVIDIOUS_INSTANCES[Math.floor(Math.random() * INVIDIOUS_INSTANCES.length)];
-    const proxyStream = `${randomInstance}/latest_version?id=${videoId}&itag=140`;
-    audioStreamCache.set(track.id, { url: proxyStream, expiresAt: Date.now() + 2 * 60 * 60 * 1000 });
-    return proxyStream;
+    try {
+      const randomInstance = INVIDIOUS_INSTANCES[Math.floor(Math.random() * INVIDIOUS_INSTANCES.length)];
+      const proxyStream = `${randomInstance}/latest_version?id=${videoId}&itag=140`;
+      audioStreamCache.set(track.id, { url: proxyStream, expiresAt: Date.now() + 2 * 60 * 60 * 1000 });
+      return proxyStream;
+    } catch (e) {}
   }
 
-  // 4. Fallback: Audius full MP3 stream
+  // 4. Fallback for mobile cellular networks outside the house (direct Apple/Spotify CDN stream)
+  const directPreview = track.rawTrack?.previewUrl || track.audioPreview?.url;
+  if (directPreview) {
+    audioStreamCache.set(track.id, { url: directPreview, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+    return directPreview;
+  }
+
+  // 5. Fallback: Audius full stream
   try {
     const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(track.title + ' ' + (track.artist || ''))}&app_name=SpotiFree`, { signal: signal || AbortSignal.timeout(4000) });
     if (audiusRes.ok) {
@@ -211,7 +222,7 @@ export async function getPlayableAudioUrl(track, signal) {
     if (e.name === 'AbortError') throw e;
   }
 
-  throw new Error('לא ניתן היה לטעון את קטע השמע. נא לנסות שיר אחר.');
+  throw new Error('לא ניתן היה לטעון את קטע השמע. נא לבדוק חיבור אינטרנט.');
 }
 
 /**

@@ -170,26 +170,9 @@ export function useAudioPlayer() {
 
       console.warn('Audio playback error:', e);
       setIsLoading(false);
-
-      const currentId = currentTrackRef.current?.id;
-      if (lastErrorTrackId === currentId) {
-        errorCount += 1;
-      } else {
-        lastErrorTrackId = currentId;
-        errorCount = 1;
-      }
-
-      if (errorCount >= 2) {
-        console.warn('Playback error threshold reached, halting');
-        return;
-      }
-
-      // Auto-skip to next track ONLY if genuine stream fails and current track is still active
-      setTimeout(() => {
-        if (currentTrackRef.current?.id === currentId && !userPausedRef.current) {
-          handleNextTrack();
-        }
-      }, 1500);
+      setIsPlaying(false);
+      releaseWakeLock();
+      stopNativeForeground();
     };
 
     audio.addEventListener('timeupdate', onTimeUpdate);
